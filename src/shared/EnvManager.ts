@@ -42,6 +42,9 @@ export interface ClaudeMemEnv {
   ANTHROPIC_AUTH_TOKEN?: string;
   GEMINI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
+  CUSTOM_OPENAI_API_KEY?: string;
+  CUSTOM_OPENAI_BASE_URL?: string;
+  CUSTOM_OPENAI_MODEL?: string;
 }
 
 function parseEnvFile(content: string): Record<string, string> {
