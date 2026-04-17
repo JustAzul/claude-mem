@@ -346,6 +346,7 @@ export function ContextSettingsModal({
                   <option value="claude">Claude (uses your Claude account)</option>
                   <option value="gemini">Gemini (uses API key)</option>
                   <option value="openrouter">OpenRouter (multi-model)</option>
+                  <option value="custom">Custom (OpenAI-compatible endpoint)</option>
                 </select>
               </FormField>
 
@@ -447,6 +448,66 @@ export function ContextSettingsModal({
                       value={formState.CLAUDE_MEM_OPENROUTER_APP_NAME || 'claude-mem'}
                       onChange={(e) => updateSetting('CLAUDE_MEM_OPENROUTER_APP_NAME', e.target.value)}
                       placeholder="claude-mem"
+                    />
+                  </FormField>
+                </>
+              )}
+
+              {formState.CLAUDE_MEM_PROVIDER === 'custom' && (
+                <>
+                  <FormField
+                    label="Base URL"
+                    tooltip="OpenAI-compatible endpoint (no trailing slash). Example: https://example.com/v1"
+                  >
+                    <input
+                      type="text"
+                      value={formState.CLAUDE_MEM_CUSTOM_BASE_URL || ''}
+                      onChange={(e) => updateSetting('CLAUDE_MEM_CUSTOM_BASE_URL', e.target.value)}
+                      placeholder="https://example.com/v1"
+                    />
+                  </FormField>
+                  <FormField
+                    label="API Key"
+                    tooltip="Bearer token sent to the endpoint (or set CUSTOM_OPENAI_API_KEY in ~/.claude-mem/.env)"
+                  >
+                    <input
+                      type="password"
+                      value={formState.CLAUDE_MEM_CUSTOM_API_KEY || ''}
+                      onChange={(e) => updateSetting('CLAUDE_MEM_CUSTOM_API_KEY', e.target.value)}
+                      placeholder="Enter API key..."
+                    />
+                  </FormField>
+                  <FormField
+                    label="Model"
+                    tooltip="Model identifier passed through to the backend"
+                  >
+                    <input
+                      type="text"
+                      value={formState.CLAUDE_MEM_CUSTOM_MODEL || ''}
+                      onChange={(e) => updateSetting('CLAUDE_MEM_CUSTOM_MODEL', e.target.value)}
+                      placeholder="e.g., gpt-4o-mini"
+                    />
+                  </FormField>
+                  <FormField
+                    label="Temperature (optional)"
+                    tooltip="Leave blank to omit. Some backends reject this parameter."
+                  >
+                    <input
+                      type="text"
+                      value={formState.CLAUDE_MEM_CUSTOM_TEMPERATURE || ''}
+                      onChange={(e) => updateSetting('CLAUDE_MEM_CUSTOM_TEMPERATURE', e.target.value)}
+                      placeholder="(omit by default)"
+                    />
+                  </FormField>
+                  <FormField
+                    label="Max output tokens (optional)"
+                    tooltip="Leave blank to omit. Some backends reject this parameter."
+                  >
+                    <input
+                      type="text"
+                      value={formState.CLAUDE_MEM_CUSTOM_MAX_OUTPUT_TOKENS || ''}
+                      onChange={(e) => updateSetting('CLAUDE_MEM_CUSTOM_MAX_OUTPUT_TOKENS', e.target.value)}
+                      placeholder="(omit by default)"
                     />
                   </FormField>
                 </>
