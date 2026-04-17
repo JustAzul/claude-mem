@@ -43,6 +43,9 @@ export interface ClaudeMemEnv {
   ANTHROPIC_BASE_URL?: string;
   GEMINI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
+  CUSTOM_OPENAI_API_KEY?: string;
+  CUSTOM_OPENAI_BASE_URL?: string;
+  CUSTOM_OPENAI_MODEL?: string;
 }
 
 /**
