@@ -590,4 +590,264 @@ describe('SessionStore memory assist persistence', () => {
     });
     expect(updated?.estimatedInjectedTokens).toBeGreaterThan(0);
   });
+
+  describe('outcome-signal → decision resolver (multi-candidate)', () => {
+    function injectFileContextDecision(input: {
+      contentSessionId: string;
+      promptNumber: number;
+      filePath: string;
+      createdAtEpoch: number;
+    }) {
+      return store.recordMemoryAssistDecision({
+        source: 'file_context',
+        status: 'injected',
+        reason: 'timeline_injected',
+        promptNumber: input.promptNumber,
+        contentSessionId: input.contentSessionId,
+        sessionDbId: 42,
+        project: 'claude-mem',
+        timestamp: input.createdAtEpoch,
+        traceItems: [
+          { observationId: Math.floor(Math.random() * 1e6), title: 'x', filePath: input.filePath },
+        ],
+      });
+    }
+
+    it('#1 with 5 injected file_context decisions and signal path overlapping 3 of them, links to the MOST RECENT overlapping', () => {
+      const session = 'resolver-overlap-multi';
+      const now = Date.now();
+      const overlappingPath = 'workspace/shared/target.ts';
+
+      const overlap1 = injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath: overlappingPath, createdAtEpoch: now - 10_000 });
+      injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath: 'workspace/other/a.ts', createdAtEpoch: now - 9_000 });
+      const overlap2 = injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath: overlappingPath, createdAtEpoch: now - 8_000 });
+      injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath: 'workspace/other/b.ts', createdAtEpoch: now - 7_000 });
+      const overlap3 = injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath: overlappingPath, createdAtEpoch: now - 6_000 });
+
+      const signal = store.recordMemoryAssistOutcomeSignal({
+        contentSessionId: session,
+        promptNumber: 1,
+        sessionDbId: 42,
+        project: 'claude-mem',
+        signalType: 'tool_use',
+        toolName: 'Read',
+        action: 'read',
+        filePath: overlappingPath,
+        relatedFilePaths: [overlappingPath],
+      });
+
+      expect(signal.decisionId).toBe(overlap3.id);
+      expect(signal.decisionId).not.toBe(overlap1.id);
+      expect(signal.decisionId).not.toBe(overlap2.id);
+    });
+
+    it('#2 with 5 injected file_context decisions and a Bash tool call (no file path), links to the nearest-in-time injected decision at-or-before the signal', () => {
+      const session = 'resolver-bash-nearest';
+      const now = Date.now();
+
+      injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath: 'a.ts', createdAtEpoch: now - 20_000 });
+      injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath: 'b.ts', createdAtEpoch: now - 15_000 });
+      const preceding = injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath: 'c.ts', createdAtEpoch: now - 10_000 });
+      injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath: 'd.ts', createdAtEpoch: now + 5_000 });
+      injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath: 'e.ts', createdAtEpoch: now + 10_000 });
+
+      const signal = store.recordMemoryAssistOutcomeSignal({
+        contentSessionId: session,
+        promptNumber: 1,
+        sessionDbId: 42,
+        project: 'claude-mem',
+        signalType: 'tool_use',
+        toolName: 'Bash',
+        action: 'command',
+        filePath: null,
+        relatedFilePaths: [],
+        timestamp: now,
+      });
+
+      expect(signal.decisionId).toBe(preceding.id);
+    });
+
+    it('#3 with mixed injected sources and a signal that overlaps none, links to the nearest-in-time injected decision', () => {
+      const session = 'resolver-mixed-sources';
+      const now = Date.now();
+
+      injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath: 'workspace/file.ts', createdAtEpoch: now - 20_000 });
+
+      const earlierSemantic = store.recordMemoryAssistDecision({
+        source: 'semantic_prompt',
+        status: 'injected',
+        reason: 'semantic_match',
+        promptNumber: 1,
+        contentSessionId: session,
+        sessionDbId: 42,
+        project: 'claude-mem',
+        timestamp: now - 15_000,
+        traceItems: [{ observationId: 501, title: 'sem-1' }],
+      });
+
+      const laterSemantic = store.recordMemoryAssistDecision({
+        source: 'semantic_prompt',
+        status: 'injected',
+        reason: 'semantic_match',
+        promptNumber: 1,
+        contentSessionId: session,
+        sessionDbId: 42,
+        project: 'claude-mem',
+        timestamp: now - 5_000,
+        traceItems: [{ observationId: 502, title: 'sem-2' }],
+      });
+
+      const signal = store.recordMemoryAssistOutcomeSignal({
+        contentSessionId: session,
+        promptNumber: 1,
+        sessionDbId: 42,
+        project: 'claude-mem',
+        signalType: 'tool_use',
+        toolName: 'Edit',
+        action: 'edit',
+        filePath: 'workspace/unrelated.ts',
+        relatedFilePaths: ['workspace/unrelated.ts'],
+        timestamp: now,
+      });
+
+      // Semantic branch runs before the nearest-in-time fallback because both
+      // semantic candidates are in the window; most-recent semantic wins.
+      expect(signal.decisionId).toBe(laterSemantic.id);
+      expect(signal.decisionId).not.toBe(earlierSemantic.id);
+    });
+
+    it('#4 with no injected candidates in window, returns null (skipped decisions do not match)', () => {
+      const session = 'resolver-skipped-only';
+
+      store.recordMemoryAssistDecision({
+        source: 'file_context',
+        status: 'skipped',
+        reason: 'below_threshold',
+        promptNumber: 1,
+        contentSessionId: session,
+        sessionDbId: 42,
+        project: 'claude-mem',
+        traceItems: [{ observationId: 601, title: 'x', filePath: 'workspace/skipped.ts' }],
+      });
+
+      const signal = store.recordMemoryAssistOutcomeSignal({
+        contentSessionId: session,
+        promptNumber: 1,
+        sessionDbId: 42,
+        project: 'claude-mem',
+        signalType: 'tool_use',
+        toolName: 'Read',
+        action: 'read',
+        filePath: 'workspace/skipped.ts',
+        relatedFilePaths: ['workspace/skipped.ts'],
+      });
+
+      expect(signal.decisionId).toBeFalsy();
+    });
+
+    it('#5 returns null when contentSessionId is missing', () => {
+      const session = 'resolver-no-session';
+      injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath: 'a.ts', createdAtEpoch: Date.now() });
+
+      const signal = store.recordMemoryAssistOutcomeSignal({
+        promptNumber: 1,
+        sessionDbId: 42,
+        project: 'claude-mem',
+        signalType: 'tool_use',
+        toolName: 'Read',
+        action: 'read',
+        filePath: 'a.ts',
+        relatedFilePaths: ['a.ts'],
+      });
+
+      expect(signal.decisionId).toBeFalsy();
+    });
+
+    it('#6 returns null when promptNumber is missing', () => {
+      const session = 'resolver-no-prompt';
+      injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath: 'a.ts', createdAtEpoch: Date.now() });
+
+      const signal = store.recordMemoryAssistOutcomeSignal({
+        contentSessionId: session,
+        sessionDbId: 42,
+        project: 'claude-mem',
+        signalType: 'tool_use',
+        toolName: 'Read',
+        action: 'read',
+        filePath: 'a.ts',
+        relatedFilePaths: ['a.ts'],
+      });
+
+      expect(signal.decisionId).toBeFalsy();
+    });
+
+    it('#7 regression: single overlapping candidate still links (pre-existing behavior preserved)', () => {
+      const session = 'resolver-single-overlap';
+      const filePath = 'workspace/only.ts';
+      const only = injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath, createdAtEpoch: Date.now() });
+
+      const signal = store.recordMemoryAssistOutcomeSignal({
+        contentSessionId: session,
+        promptNumber: 1,
+        sessionDbId: 42,
+        project: 'claude-mem',
+        signalType: 'tool_use',
+        toolName: 'Read',
+        action: 'read',
+        filePath,
+        relatedFilePaths: [filePath],
+      });
+
+      expect(signal.decisionId).toBe(only.id);
+    });
+
+    it('relinkOrphanOutcomeSignal retroactively links a signal inserted with decision_id=NULL', () => {
+      const session = 'resolver-relink';
+      const filePath = 'workspace/retro.ts';
+      const now = Date.now();
+      injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath, createdAtEpoch: now - 5_000 });
+      const target = injectFileContextDecision({ contentSessionId: session, promptNumber: 1, filePath, createdAtEpoch: now - 1_000 });
+
+      // Insert a signal directly as orphan (simulate the old-resolver NULL path)
+      const insertedId = store.db.prepare(`
+        INSERT INTO memory_assist_outcome_signals (
+          decision_id, content_session_id, session_db_id, project, signal_type,
+          tool_name, action, file_path, related_file_paths_json, created_at_epoch, prompt_number
+        ) VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(session, 42, 'claude-mem', 'tool_use', 'Read', 'read', filePath,
+        JSON.stringify([filePath]), now, 1).lastInsertRowid as number;
+
+      const linkedDecisionId = store.relinkOrphanOutcomeSignal(insertedId);
+      expect(linkedDecisionId).toBe(target.id);
+
+      const row = store.db.prepare(`SELECT decision_id FROM memory_assist_outcome_signals WHERE id = ?`)
+        .get(insertedId) as { decision_id: number };
+      expect(row.decision_id).toBe(target.id);
+    });
+
+    it('listOrphanOutcomeSignalIds returns only rows with NULL decision_id and non-null session/prompt', () => {
+      const session = 'resolver-list-orphans';
+      const filePath = 'workspace/list.ts';
+      const now = Date.now();
+
+      // Orphan row within window
+      store.db.prepare(`
+        INSERT INTO memory_assist_outcome_signals (
+          decision_id, content_session_id, session_db_id, project, signal_type,
+          tool_name, action, file_path, created_at_epoch, prompt_number
+        ) VALUES (NULL, ?, 42, 'claude-mem', 'tool_use', 'Read', 'read', ?, ?, 1)
+      `).run(session, filePath, now);
+
+      // Unlinkable (no content_session_id) — should NOT appear
+      store.db.prepare(`
+        INSERT INTO memory_assist_outcome_signals (
+          decision_id, content_session_id, session_db_id, project, signal_type,
+          tool_name, action, created_at_epoch, prompt_number
+        ) VALUES (NULL, NULL, 42, 'claude-mem', 'tool_use', 'Read', 'read', ?, 1)
+      `).run(now);
+
+      const ids = store.listOrphanOutcomeSignalIds(now - 60_000);
+      expect(ids.length).toBe(1);
+    });
+  });
 });

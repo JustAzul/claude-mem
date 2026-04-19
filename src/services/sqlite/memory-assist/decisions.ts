@@ -44,6 +44,7 @@ interface DecisionRow {
   message: string | null;
   estimated_injected_tokens: number | null;
   trace_items_json: string | null;
+  selected_ids_json: string | null;
   shadow_ranking_json: string | null;
   system_verdict: MemoryAssistSystemVerdict | null;
   system_confidence: number | null;
@@ -98,6 +99,9 @@ export function ensureMemoryAssistDecisionsTable(db: Database): void {
   if (!columns.some((column) => column.name === 'system_evidence_json')) {
     db.run('ALTER TABLE memory_assist_decisions ADD COLUMN system_evidence_json TEXT');
   }
+  if (!columns.some((column) => column.name === 'selected_ids_json')) {
+    db.run('ALTER TABLE memory_assist_decisions ADD COLUMN selected_ids_json TEXT');
+  }
 }
 
 function hydrateDecision(row: DecisionRow): MemoryAssistDecisionRecord {
@@ -124,6 +128,7 @@ function hydrateDecision(row: DecisionRow): MemoryAssistDecisionRecord {
     message: row.message ?? undefined,
     estimatedInjectedTokens: row.estimated_injected_tokens ?? undefined,
     traceItems: parseJson<MemoryAssistTraceItem[]>(row.trace_items_json, []),
+    selectedIds: parseJson<number[]>(row.selected_ids_json, []) || undefined,
     shadowRanking: parseJson<MemoryAssistShadowRanking | null>(row.shadow_ranking_json, null),
     systemVerdict: row.system_verdict,
     systemConfidence: row.system_confidence,
@@ -165,6 +170,7 @@ export function recordMemoryAssistDecision(
       message,
       estimated_injected_tokens,
       trace_items_json,
+      selected_ids_json,
       shadow_ranking_json,
       system_verdict,
       system_confidence,
@@ -173,7 +179,7 @@ export function recordMemoryAssistDecision(
       user_feedback,
       created_at_epoch,
       updated_at_epoch
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const result = insert.run(
@@ -195,6 +201,7 @@ export function recordMemoryAssistDecision(
     report.message ?? null,
     report.estimatedInjectedTokens ?? null,
     serializeJson(report.traceItems ?? []),
+    serializeJson(report.selectedIds ?? null),
     serializeJson(report.shadowRanking ?? null),
     report.systemVerdict ?? null,
     report.systemConfidence ?? null,
@@ -295,17 +302,20 @@ export function getMemoryAssistDecisionsForPrompt(
   db: Database,
   contentSessionId: string,
   promptNumber: number,
-  withinMs: number
+  withinMs: number,
+  referenceEpoch: number = Date.now()
 ): MemoryAssistDecisionRecord[] {
-  const sinceEpoch = Date.now() - withinMs;
+  const sinceEpoch = referenceEpoch - withinMs;
+  const untilEpoch = referenceEpoch + withinMs;
   const rows = db.prepare(`
     SELECT *
     FROM memory_assist_decisions
     WHERE content_session_id = ?
       AND prompt_number = ?
       AND created_at_epoch >= ?
+      AND created_at_epoch <= ?
     ORDER BY created_at_epoch DESC
-  `).all(contentSessionId, promptNumber, sinceEpoch) as DecisionRow[];
+  `).all(contentSessionId, promptNumber, sinceEpoch, untilEpoch) as DecisionRow[];
 
   return rows.map(hydrateDecision);
 }
@@ -347,6 +357,32 @@ export function attachMemoryAssistDecisionFeedback(
         updated_at_epoch = ?
     WHERE id = ?
   `).run(label, Date.now(), decisionId);
+}
+
+export function getRecentlyInjectedIds(
+  db: Database,
+  contentSessionId: string,
+  currentPromptNumber: number,
+  windowSize: number
+): Set<number> {
+  const minPrompt = currentPromptNumber - windowSize;
+  const rows = db.prepare(`
+    SELECT selected_ids_json
+    FROM memory_assist_decisions
+    WHERE content_session_id = ?
+      AND status = 'injected'
+      AND prompt_number >= ?
+      AND prompt_number < ?
+  `).all(contentSessionId, minPrompt, currentPromptNumber) as Array<{ selected_ids_json: string | null }>;
+
+  const ids = new Set<number>();
+  for (const row of rows) {
+    const parsed = parseJson<number[]>(row.selected_ids_json, []);
+    for (const id of parsed) {
+      if (Number.isFinite(id) && id > 0) ids.add(id);
+    }
+  }
+  return ids;
 }
 
 export function getDecisionRowsForIds(

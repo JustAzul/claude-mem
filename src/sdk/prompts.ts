@@ -94,6 +94,7 @@ ${mode.prompts.header_memory_start}`;
 export interface ObservationTurnContext {
   userRequest: string | null;
   priorAssistantMessage: string | null;
+  priorObservations?: string[];  // compact timeline: ["HH:MM [type] title", ...]
 }
 
 function truncateWithSuffix(text: string, max: number): string {
@@ -178,7 +179,7 @@ export function buildObservationPrompt(obs: Observation, turnContext?: Observati
   const userRequestBlock = renderTurnContextField(turnContext?.userRequest, 500);
   const priorAssistantBlock = renderTurnContextField(turnContext?.priorAssistantMessage, 300);
 
-  return `<observed_from_primary_session>
+  const base = `<observed_from_primary_session>
   <user_request>${userRequestBlock}</user_request>
   <prior_assistant_message>${priorAssistantBlock}</prior_assistant_message>
   <what_happened>${obs.tool_name}</what_happened>
@@ -190,6 +191,12 @@ export function buildObservationPrompt(obs: Observation, turnContext?: Observati
 Return either one or more <observation>...</observation> blocks, or an empty response if this tool use should be skipped.
 Concrete debugging findings from logs, queue state, database rows, session routing, or code-path inspection count as durable discoveries and should be recorded.
 Never reply with prose such as "Skipping", "No substantive tool executions", or any explanation outside XML. Non-XML text is discarded.`;
+
+  if (turnContext?.priorObservations?.length) {
+    return base + `\n\nPRIOR_OBSERVATIONS_ON_SAME_FILES (chronological, what was done to these files before this action):\n` +
+      turnContext.priorObservations.join('\n');
+  }
+  return base;
 }
 
 /**
@@ -204,8 +211,6 @@ export function buildSummaryPrompt(session: SDKSession, mode: ModeConfig): strin
   })();
 
   return `--- MODE SWITCH: PROGRESS SUMMARY ---
-Do NOT output <observation> tags. This is a summary request, not an observation request.
-Your response MUST use <summary> tags ONLY. Any <observation> output will be discarded.
 
 ${mode.prompts.header_summary_checkpoint}
 ${mode.prompts.summary_instruction}
@@ -223,7 +228,9 @@ ${mode.prompts.summary_format_instruction}
   <notes>${mode.prompts.xml_summary_notes_placeholder}</notes>
 </summary>
 
-${mode.prompts.summary_footer}`;
+${mode.prompts.summary_footer}
+
+CRITICAL FORMAT RULE: Your output must contain ONLY the <summary>...</summary> block above. Do NOT use <observation> tags — this is a summary turn, not an observation turn. Any <observation> tag in your output will cause this entire summary to be silently discarded by the system.`;
 }
 
 /**

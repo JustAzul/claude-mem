@@ -42,6 +42,8 @@ export class MigrationRunner {
     this.migrateToV30();
     this.migrateToV31();
     this.migrateToV32();
+    this.migrateToV33();
+    this.migrateToV34();
   }
 
   /**
@@ -1271,5 +1273,50 @@ export class MigrationRunner {
 
     this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(32, new Date().toISOString());
     logger.debug('DB', 'Migration V32 complete: mcp_invocations table');
+  }
+
+  /**
+   * Create memory_implicit_signals table for implicit use tracking (migration 33)
+   *
+   * Stores file_reuse and content_cited signals computed after injection events,
+   * enabling direct evidence of whether injected memory was actually used.
+   *
+   * Idempotent: checks table existence before DDL.
+   */
+  private migrateToV33(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(33) as SchemaVersion | undefined;
+    const tableCheck = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memory_implicit_signals'").get() as { name: string } | undefined;
+
+    if (applied && tableCheck) return;
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS memory_implicit_signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        decision_id INTEGER NOT NULL,
+        observation_id INTEGER NOT NULL,
+        signal_kind TEXT NOT NULL CHECK(signal_kind IN ('file_reuse', 'content_cited', 'no_overlap')),
+        evidence TEXT,
+        confidence REAL,
+        computed_at_epoch INTEGER NOT NULL,
+        FOREIGN KEY (decision_id) REFERENCES memory_assist_decisions(id),
+        FOREIGN KEY (observation_id) REFERENCES observations(id)
+      )
+    `);
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_mis_decision ON memory_implicit_signals(decision_id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_mis_obs ON memory_implicit_signals(observation_id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_mis_kind_time ON memory_implicit_signals(signal_kind, computed_at_epoch DESC)');
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(33, new Date().toISOString());
+    logger.debug('DB', 'Migration V33 complete: memory_implicit_signals table');
+  }
+
+  private migrateToV34(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(34) as SchemaVersion | undefined;
+    if (applied) return;
+
+    this.db.run(`ALTER TABLE observation_capture_snapshots ADD COLUMN llm_raw_type TEXT`);
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(34, new Date().toISOString());
+    logger.debug('DB', 'Migration V34 complete: llm_raw_type column on observation_capture_snapshots');
   }
 }

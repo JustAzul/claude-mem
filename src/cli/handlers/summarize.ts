@@ -123,6 +123,19 @@ export const summarizeHandler: EventHandler = {
       }
     }
 
+    // 3a. Fire-and-forget: compute implicit use signals for this session.
+    //     Best-effort — never blocks the hook on failure. Timeout 10s.
+    try {
+      await workerHttpRequest('/api/memory/compute-signals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contentSessionId: sessionId }),
+        timeoutMs: 10_000
+      });
+    } catch (err) {
+      logger.debug('HOOK', `Summary: implicit-signal compute skipped: ${err instanceof Error ? err.message : err}`);
+    }
+
     // 3. Complete the session — clean up active sessions map.
     //    This runs here in Stop (120s timeout) instead of SessionEnd (1.5s cap)
     //    so it reliably fires after summary work is done.

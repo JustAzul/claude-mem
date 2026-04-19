@@ -31,6 +31,8 @@ export interface CaptureSnapshotSource {
 
 export interface CaptureSnapshotCaptured {
   type: string;
+  /** Type the LLM intended before the gate downgraded it (null if gate did not fire). */
+  llmRawType: string | null;
   title: string | null;
   subtitle: string | null;
   narrative: string | null;
@@ -78,6 +80,7 @@ export function insertCaptureSnapshot(
         tool_output,
         cwd,
         captured_type,
+        llm_raw_type,
         captured_title,
         captured_subtitle,
         captured_narrative,
@@ -87,7 +90,7 @@ export function insertCaptureSnapshot(
         captured_alternatives_rejected,
         captured_related_observation_ids,
         created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -102,6 +105,7 @@ export function insertCaptureSnapshot(
       source.toolOutput,
       source.cwd,
       captured.type,
+      captured.llmRawType,
       captured.title,
       captured.subtitle,
       captured.narrative,
@@ -182,6 +186,7 @@ export function toSnapshotString(value: unknown): string | null {
  */
 export function capturedFromObservation(observation: {
   type: string;
+  pre_gate_type?: string | null;
   title: string | null;
   subtitle: string | null;
   facts: string[];
@@ -193,6 +198,7 @@ export function capturedFromObservation(observation: {
 }): CaptureSnapshotCaptured {
   return {
     type: observation.type,
+    llmRawType: observation.pre_gate_type ?? null,
     title: observation.title,
     subtitle: observation.subtitle,
     narrative: observation.narrative,

@@ -60,7 +60,7 @@ export function applyObservationGates(
           contentSessionId,
         }
       );
-      return { ...obs, type: 'change' };
+      return { ...obs, type: 'change', pre_gate_type: 'bugfix' };
     }
 
     if (
@@ -78,7 +78,7 @@ export function applyObservationGates(
           hasAlternatives: !isBlank(obs.alternatives_rejected),
         }
       );
-      return { ...obs, type: 'discovery' };
+      return { ...obs, type: 'discovery', pre_gate_type: 'decision' };
     }
 
     return obs;

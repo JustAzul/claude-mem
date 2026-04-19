@@ -579,6 +579,65 @@ NEVER fetch full details without filtering first. 10x token savings.`,
       if (typeof name !== 'string' || name.trim() === '') throw new Error('Missing required argument: name');
       return await callWorkerAPIPost(`/api/corpus/${encodeURIComponent(name)}/reprime`, rest);
     }
+  },
+  {
+    name: 'audit_recent_memory',
+    description: 'Self-audit: for each memory injected in the given window, report whether Claude actually used it (touched a suggested file or cited its content within 30 min). Returns per-decision verdicts plus a summary. Use when you want to check if memory is helping — not just being delivered.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        contentSessionId: { type: 'string', description: 'Content session ID to audit. Required.' },
+        windowMinutes: { type: 'number', description: 'Lookback window in minutes (default 60, max 1440).' }
+      },
+      required: ['contentSessionId'],
+      additionalProperties: true
+    },
+    handler: async (args: any) => {
+      const contentSessionId = typeof args.contentSessionId === 'string' ? args.contentSessionId : null;
+      if (!contentSessionId) throw new Error('Missing required argument: contentSessionId');
+      const qs = new URLSearchParams({
+        contentSessionId,
+        ...(typeof args.windowMinutes === 'number' ? { windowMinutes: String(args.windowMinutes) } : {}),
+      });
+      const raw = await callWorkerAPI(`/api/memory/audit?${qs.toString()}`, {});
+      // callWorkerAPI wraps JSON in { content: [{ type: 'text', text }] } — parse it so we can format.
+      let payload: any = null;
+      try {
+        const firstText = raw?.content?.[0]?.text;
+        if (typeof firstText === 'string') payload = JSON.parse(firstText);
+      } catch {
+        return raw; // fall back to raw wrap
+      }
+      if (!payload) return raw;
+
+      const lines: string[] = [];
+      lines.push(`# Memory Audit · session ${payload.session.contentSessionId}`);
+      lines.push(`Window: last ${payload.session.windowMinutes} min`);
+      lines.push('');
+      lines.push(`**Summary:** ${payload.summary.total} injections · ${payload.summary.used} used · ${payload.summary.unused} unused · ${payload.summary.pending} pending${payload.summary.useRate != null ? ` · ${payload.summary.useRate}% use rate` : ''}`);
+      lines.push('');
+      if (payload.injections.length === 0) {
+        lines.push('_No injections in the window._');
+      } else {
+        for (const inj of payload.injections) {
+          const verdictEmoji = inj.verdict === 'used' ? '✅' : inj.verdict === 'unused' ? '❌' : '⏳';
+          lines.push(`## ${verdictEmoji} Decision #${inj.decisionId} · ${inj.source} · ${new Date(inj.injectedAtEpoch).toLocaleTimeString()}`);
+          for (const obs of inj.observations) {
+            const sig = obs.signal;
+            const sigLabel = sig == null
+              ? '_pending_'
+              : sig.kind === 'file_reuse'
+                ? `file_reuse (${sig.confidence}) — ${sig.evidence}`
+                : sig.kind === 'content_cited'
+                  ? `content_cited (${sig.confidence}) — "${sig.evidence}"`
+                  : 'no_overlap';
+            lines.push(`- obs #${obs.id} [${obs.type}] ${obs.title ?? '(no title)'}  → ${sigLabel}`);
+          }
+          lines.push('');
+        }
+      }
+      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+    }
   }
 ];
 

@@ -27,6 +27,8 @@ export interface PromptSemanticAssistRequest {
   sessionDbId?: number;
   contentSessionId?: string;
   platformSource?: string;
+  /** Override Chroma doc_type filter. Defaults to 'observation'. POC/research use only. */
+  docType?: string;
 }
 
 export interface PromptSemanticAssistResult {
@@ -93,9 +95,10 @@ export class PromptSemanticAssistService {
     }
 
     try {
+      const docType = input.docType ?? 'observation';
       const whereFilter = input.project
-        ? { $and: [{ doc_type: 'observation' }, { project: input.project }] }
-        : { doc_type: 'observation' };
+        ? { $and: [{ doc_type: docType }, { project: input.project }] }
+        : { doc_type: docType };
       const lookaheadLimit = Math.min(limit * MAX_LOOKAHEAD_MULTIPLIER, 40);
       const chromaResults = await this.chromaSync.queryChroma(query, lookaheadLimit, whereFilter);
 
@@ -119,8 +122,34 @@ export class PromptSemanticAssistService {
         distance: chromaResults.distances[index] ?? Number.POSITIVE_INFINITY,
       }));
 
-      const selectedCandidates = candidates
+      let selectedCandidates = candidates
         .filter(candidate => candidate.distance <= threshold);
+
+      // Exclude IDs injected within the last DEDUP_WINDOW prompts to avoid bloat.
+      // After the window expires (or on session compaction), re-injection is allowed.
+      const DEDUP_WINDOW = 5;
+      if (input.contentSessionId && input.promptNumber != null && selectedCandidates.length > 0) {
+        const recentIds = this.sessionStore.getRecentlyInjectedIds(
+          input.contentSessionId, input.promptNumber, DEDUP_WINDOW
+        );
+        if (recentIds.size > 0) {
+          selectedCandidates = selectedCandidates.filter(c => !recentIds.has(Number(c.id)));
+          if (selectedCandidates.length === 0) {
+            logger.debug(`[PromptSemanticAssistService] skipped semantic recall: all candidates recently injected (window=${DEDUP_WINDOW})`);
+            return {
+              context: '',
+              count: 0,
+              decision: {
+                ...baseDecision,
+                status: 'skipped',
+                reason: 'recently_injected',
+                candidateCount: candidates.length,
+                selectedCount: 0,
+              },
+            };
+          }
+        }
+      }
 
       if (selectedCandidates.length === 0) {
         const distances = candidates.map(candidate => candidate.distance).filter(Number.isFinite);
@@ -138,6 +167,55 @@ export class PromptSemanticAssistService {
             selectedCount: 0,
             bestDistance: distances.length > 0 ? Math.min(...distances) : null,
             worstDistance: distances.length > 0 ? Math.max(...distances) : null,
+          },
+        };
+      }
+
+      if (docType === 'session_summary') {
+        const summaryIds = selectedCandidates.map(c => Number(c.id)).filter(n => Number.isFinite(n) && n > 0);
+        const summaries = this.sessionStore.getSessionSummariesByIds(summaryIds, { orderBy: 'date_desc' }).slice(0, limit);
+
+        if (summaries.length === 0) {
+          logger.warn('[PromptSemanticAssistService] skipped summary recall: hydration miss');
+          return {
+            context: '',
+            count: 0,
+            decision: {
+              ...baseDecision,
+              source: 'semantic_summary' as const,
+              status: 'skipped',
+              reason: 'hydration_miss',
+              candidateCount: candidates.length,
+              selectedCount: 0,
+            },
+          };
+        }
+
+        const lines: string[] = ['## Relevant Past Work (session summary)\n'];
+        for (const s of summaries) {
+          const date = (s.created_at as string | undefined)?.slice(0, 10) || '';
+          lines.push(`### Session: ${s.project} (${date})`);
+          if (s.investigated) lines.push(`**Investigated:** ${s.investigated}`);
+          if (s.completed) lines.push(`**Completed:** ${s.completed}`);
+          if (s.learned) lines.push(`**Learned:** ${s.learned}`);
+          lines.push('');
+        }
+        const summaryContext = lines.join('\n');
+        const selectedDistances = selectedCandidates.map(c => c.distance).filter(Number.isFinite);
+        return {
+          context: summaryContext,
+          count: summaries.length,
+          decision: {
+            ...baseDecision,
+            source: 'semantic_summary' as const,
+            status: 'injected',
+            reason: 'semantic_match',
+            candidateCount: candidates.length,
+            selectedCount: summaries.length,
+            selectedIds: summaryIds,
+            bestDistance: selectedDistances.length > 0 ? Math.min(...selectedDistances) : null,
+            worstDistance: selectedDistances.length > 0 ? Math.max(...selectedDistances) : null,
+            estimatedInjectedTokens: estimateTokens(summaryContext),
           },
         };
       }
@@ -194,6 +272,7 @@ export class PromptSemanticAssistService {
           reason: 'semantic_match',
           candidateCount: candidates.length,
           selectedCount: selectedObservations.length,
+          selectedIds: rankedMatches.map(m => m.observation.id),
           bestDistance: selectedDistances.length > 0 ? Math.min(...selectedDistances) : null,
           worstDistance: selectedDistances.length > 0 ? Math.max(...selectedDistances) : null,
           estimatedInjectedTokens: estimateTokens(context),

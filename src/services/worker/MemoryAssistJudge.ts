@@ -330,6 +330,20 @@ export function judgeMemoryAssistDecision(
     });
   }
 
+  // Summary injections have no traceItems (no file paths) so path-overlap logic
+  // always produces touchedFiles=0 and falls through to likely_not_helped — which
+  // is structurally wrong. Return unclear instead: the injection may have been
+  // valuable but we lack a signal to measure it.
+  const isSummaryInjection = (decision.traceItems?.length ?? 0) === 0 && (decision.selectedCount ?? 0) > 0;
+  if (isSummaryInjection) {
+    return finalizeJudgeResult(decision, {
+      verdict: 'unclear',
+      confidence: 0.3,
+      reasons: ['Summary injections have no file-path signals; adoption cannot be measured without explicit feedback.'],
+      evidence: emptyEvidence(),
+    });
+  }
+
   // Exclude the triggering tool call from outcomes. file_context injection fires
   // on PreToolUse for a Read; the corresponding PostToolUse for that same Read
   // later writes an outcome with the same prompt_number, same file_path, and

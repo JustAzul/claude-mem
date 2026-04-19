@@ -111,6 +111,21 @@ export async function processAgentResponse(
     obs.concepts = normalizeConcepts(obs.concepts, activeModeForConcepts);
   }
 
+  // Log raw LLM output snippet when concepts are empty but facts are present.
+  // This captures whether the LLM omitted <concepts> entirely vs. used wrong inner-tag format.
+  for (const obs of observations) {
+    if (obs.concepts.length === 0 && obs.facts.length >= 2) {
+      const snippet = text.length > 600 ? `${text.slice(0, 600)}…` : text;
+      logger.warn('PARSER', 'Observation stored with empty concepts — raw response snippet', {
+        sessionId: session.sessionDbId,
+        title: obs.title,
+        factsCount: obs.facts.length,
+        whyPresent: obs.why !== null,
+        rawSnippet: snippet
+      });
+    }
+  }
+
   // telemetry measures LLM→normalizer accuracy; snapshot types before post-processing
   // overrides so the forced values (e.g. 'discovery' for Read/Grep) do not pollute
   // LLM accuracy metrics — we want to measure what the normalizer produced, not what

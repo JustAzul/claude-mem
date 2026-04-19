@@ -41,3 +41,5 @@ CONTRIB_NOTES.md
 
 # Playwright MCP runtime artifacts (screenshots, logs, snapshots)
 .playwright-mcp/
+# POC report outputs — contain real observation data (potential PII)
+scripts/poc-*-report.md

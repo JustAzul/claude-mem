@@ -33,12 +33,28 @@ interface MemoryAssistOverviewProps {
     helpRate: number | null;
   };
   promptStats: SourceAssistStats;
+  summaryStats: SourceAssistStats;
   fileStats: SourceAssistStats;
   feedbackStats: FeedbackStats | null;
   tokenEconomics: TokenEconomicsStats | null;
   howToReadDismissed: boolean;
   onHowToReadDismissedChange: (dismissed: boolean) => void;
   onTraceLatest: () => void;
+  implicitUseRate?: number | null;
+  implicitUseCounts?: {
+    file_reuse: number;
+    content_cited: number;
+    no_overlap: number;
+    not_yet_computed: number;
+  } | null;
+  recentTrend?: {
+    sinceEpoch: number;
+    totalDecisions: number;
+    injectRate: number | null;
+    likelyHelpedRate: number | null;
+    injected: number;
+    actionable: number;
+  } | null;
 }
 
 function SectionLabel({ title, subtitle }: { title: string; subtitle?: string }) {
@@ -213,13 +229,26 @@ export function MemoryAssistOverview({
   windowDays,
   overallStats,
   promptStats,
+  summaryStats,
   fileStats,
   feedbackStats,
   tokenEconomics,
   howToReadDismissed,
   onHowToReadDismissedChange,
   onTraceLatest,
+  implicitUseRate,
+  implicitUseCounts,
+  recentTrend,
 }: MemoryAssistOverviewProps) {
+  // Bimodal workload hint — 30d aggregate hides the fact that rates
+  // can swing 1.6% → 75% within a day. Surface "last 1h" alongside the
+  // main number so the user sees the trend direction, not just the mean.
+  const lastHourHelpfulBadge = recentTrend && recentTrend.likelyHelpedRate != null && recentTrend.actionable > 0
+    ? ` · Last 1h: ${recentTrend.likelyHelpedRate}% (${recentTrend.injected}/${recentTrend.actionable})`
+    : '';
+  const lastHourInjectBadge = recentTrend && recentTrend.injectRate != null && recentTrend.actionable > 0
+    ? ` · Last 1h inject: ${recentTrend.injectRate}%`
+    : '';
   const tone = toneFor(latest);
   const [openTooltip, setOpenTooltip] = React.useState<{
     id: string;
@@ -269,6 +298,9 @@ export function MemoryAssistOverview({
     : 0;
   const promptContribution = overallStats.likelyHelped > 0
     ? Math.round((promptStats.likelyHelped / overallStats.likelyHelped) * 100)
+    : 0;
+  const summaryContribution = overallStats.likelyHelped > 0
+    ? Math.round((summaryStats.likelyHelped / overallStats.likelyHelped) * 100)
     : 0;
 
   // Build the LIVE STATE chip values once, used in the chip strip below.
@@ -455,9 +487,9 @@ export function MemoryAssistOverview({
           <StatCard
             title={`Overall likely helpful (${windowDays}d)`}
             value={overallStats.likelyHelpedRate == null ? '—' : `${overallStats.likelyHelpedRate}%`}
-            meta={`${overallStats.likelyHelped}/${overallActionable || 0} checked recalls looked helpful overall. ${fileStats.likelyHelped} came from file memory and ${promptStats.likelyHelped} came from prompt memory.`}
+            meta={`${overallStats.likelyHelped}/${overallActionable || 0} checked recalls looked helpful overall. ${fileStats.likelyHelped} from file memory, ${promptStats.likelyHelped} from prompt memory, ${summaryStats.likelyHelped} from session summaries.${lastHourHelpfulBadge}`}
             accent="var(--color-accent-success)"
-            info="This is the combined system-judged likely-helpful rate across prompt memory and file memory."
+            info="This is the combined system-judged likely-helpful rate across prompt memory and file memory. The 'Last 1h' badge shows the most recent hour so you can see whether the aggregate is trending up or down."
             tooltipId="overall-likely-helpful"
             onToggleTooltip={toggleTooltip}
           />
@@ -480,6 +512,15 @@ export function MemoryAssistOverview({
             onToggleTooltip={toggleTooltip}
           />
           <StatCard
+            title={`Session summary likely helpful (${windowDays}d)`}
+            value={summaryStats.likelyHelpedRate == null ? '—' : `${summaryStats.likelyHelpedRate}%`}
+            meta={`${summaryStats.likelyHelped}/${summaryStats.actionable || 0} session-summary recalls were judged likely helpful. That is ${summaryContribution}% of the overall likely-helpful recalls.`}
+            accent="var(--color-accent-primary)"
+            info="This card only measures session-summary recall (investigated / completed / learned fields). It is a slice of the overall total, not a separate total."
+            tooltipId="summary-likely-helpful"
+            onToggleTooltip={toggleTooltip}
+          />
+          <StatCard
             title={`Manual helpful votes (${windowDays}d)`}
             value={String(feedbackStats?.helpful ?? 0)}
             meta={
@@ -492,91 +533,58 @@ export function MemoryAssistOverview({
             onToggleTooltip={toggleTooltip}
           />
           <StatCard
-            title="Memory ROI"
-            value={tokenEconomics ? `${tokenEconomics.savingsPercent}%` : '—'}
+            title={`Implicit use rate (${windowDays}d)`}
+            value={implicitUseRate == null ? '—' : `${implicitUseRate}%`}
             meta={
-              tokenEconomics
-                ? `${formatTokenCount(tokenEconomics.savings)} net saved from ${formatTokenCount(tokenEconomics.totalDiscoveryTokens)} discovery spend.`
-                : 'No token economics available yet.'
+              implicitUseCounts
+                ? `${implicitUseCounts.file_reuse} used · ${implicitUseCounts.content_cited} cited · ${implicitUseCounts.no_overlap} unused · ${implicitUseCounts.not_yet_computed} pending (signals compute at session end)${lastHourInjectBadge}`
+                : `Signals compute at session end.${lastHourInjectBadge}`
             }
-            info="Net token return from memory so far: estimated reread cost minus discovery spend."
-            tooltipId="memory-roi"
+            accent="var(--color-accent-primary)"
+            info="% of injected memories where Claude actually touched a suggested file or cited its content. Computed only for sessions that have ended — 'pending' injections are excluded from the rate."
+            tooltipId="implicit-use-rate"
             onToggleTooltip={toggleTooltip}
           />
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.15fr) minmax(320px, 1fr)', gap: 12 }}>
-          <div
-            style={{
-              padding: '14px 16px',
-              borderRadius: 12,
-              background: 'var(--color-bg-stat)',
-              border: '1px solid var(--color-border-primary)',
-              display: 'grid',
-              gap: 12,
-            }}
-          >
-            <SectionLabel
-              title="Recall funnel"
-              subtitle="Read top to bottom. Fewer items should survive each stage."
-            />
-            <RatioBar
-              label="Checked recalls"
-              value={overallActionable}
-              total={overallActionable || 1}
-              color="var(--color-accent-primary)"
-            />
-            <RatioBar
-              label="Injected at all"
-              value={overallStats.injected}
-              total={overallActionable || 1}
-              color="var(--color-accent-primary)"
-            />
-            <RatioBar
-              label="Likely helpful"
-              value={overallStats.likelyHelped}
-              total={overallActionable || 1}
-              color="var(--color-accent-success)"
-            />
-            <RatioBar
-              label="Manually confirmed"
-              value={manualVoteCount}
-              total={overallActionable || 1}
-              color="var(--color-accent-warning)"
-            />
-          </div>
-
-          <div
-            style={{
-              padding: '14px 16px',
-              borderRadius: 12,
-              background: 'var(--color-bg-stat)',
-              border: '1px solid var(--color-border-primary)',
-              display: 'grid',
-              gap: 12,
-            }}
-          >
-            <SectionLabel
-              title="Where likely-helpful recalls came from"
-              subtitle="This explains why the overall total can match one source exactly."
-            />
-            <RatioBar
-              label="File memory share of likely-helpful recalls"
-              value={fileStats.likelyHelped}
-              total={overallStats.likelyHelped || 1}
-              color="var(--color-accent-success)"
-            />
-            <RatioBar
-              label="Prompt memory share of likely-helpful recalls"
-              value={promptStats.likelyHelped}
-              total={overallStats.likelyHelped || 1}
-              color="var(--color-accent-primary)"
-            />
-            <div style={{ display: 'grid', gap: 4, fontSize: 13, color: 'var(--color-text-secondary)' }}>
-              <div><strong style={{ color: 'var(--color-text-primary)' }}>{fileContribution}%</strong> of likely-helpful recalls in this window came from file memory.</div>
-              <div><strong style={{ color: 'var(--color-text-primary)' }}>{promptContribution}%</strong> came from prompt memory.</div>
-            </div>
-          </div>
+        <div
+          style={{
+            padding: '14px 16px',
+            borderRadius: 12,
+            background: 'var(--color-bg-stat)',
+            border: '1px solid var(--color-border-primary)',
+            display: 'grid',
+            gap: 12,
+          }}
+        >
+          <SectionLabel
+            title="Recall funnel"
+            subtitle="Read top to bottom. Fewer items should survive each stage."
+          />
+          <RatioBar
+            label="Checked recalls"
+            value={overallActionable}
+            total={overallActionable || 1}
+            color="var(--color-accent-primary)"
+          />
+          <RatioBar
+            label="Injected at all"
+            value={overallStats.injected}
+            total={overallActionable || 1}
+            color="var(--color-accent-primary)"
+          />
+          <RatioBar
+            label="Likely helpful"
+            value={overallStats.likelyHelped}
+            total={overallActionable || 1}
+            color="var(--color-accent-success)"
+          />
+          <RatioBar
+            label="Manually confirmed"
+            value={manualVoteCount}
+            total={overallActionable || 1}
+            color="var(--color-accent-warning)"
+          />
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
@@ -590,20 +598,24 @@ export function MemoryAssistOverview({
             windowDays={windowDays}
             color="var(--color-accent-primary)"
           />
+          <SourceSummaryCard
+            stats={summaryStats}
+            windowDays={windowDays}
+            color="var(--color-accent-primary)"
+          />
         </div>
 
-        {/* Efficiency — single inline strip; tooltip replaces the dropped subtitle */}
         {tokenEconomics && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 12, color: 'var(--color-text-secondary)' }}>
             <span style={{ fontWeight: 700, letterSpacing: 0.3, textTransform: 'uppercase', fontSize: 11, color: 'var(--color-text-muted)' }}>
-              Efficiency
+              Token efficiency
             </span>
             <button
               type="button"
-              aria-label="Token cost is a separate lens from quality. Use this after you trust the quality numbers. Discovery spend: tokens used creating these memories. Estimated reread cost: tokens to reread observations directly without memory compression. Net saved: estimated reread cost minus discovery spend."
+              aria-label="Processed: tokens claude-mem spent reading tool use and sessions to build observations (the discovery cost). Stored: compressed size of all observations in the knowledge base. Compression: how much smaller the stored form is vs what was processed."
               onClick={(event) => toggleTooltip(
                 'efficiency-info',
-                'Token cost is a separate lens from quality. Use this after you trust the quality numbers. Discovery spend = tokens used creating memories. Estimated reread cost = tokens to reread observations directly. Net saved = reread cost minus discovery spend.',
+                'Processed = tokens claude-mem consumed reading raw sessions to build observations (your AI spend on memory creation). Stored = compressed token footprint of all observations. Compression = processed / stored.',
                 event.currentTarget
               )}
               style={{
@@ -626,18 +638,19 @@ export function MemoryAssistOverview({
               ?
             </button>
             <span>
-              {formatTokenCount(tokenEconomics.totalDiscoveryTokens)} spent
+              Processed: {formatTokenCount(tokenEconomics.totalDiscoveryTokens)}
             </span>
             <span style={{ color: 'var(--color-text-muted)' }}>·</span>
             <span>
-              {formatTokenCount(tokenEconomics.totalReadTokens)} reread
+              Stored: {formatTokenCount(tokenEconomics.totalReadTokens)}
             </span>
             <span style={{ color: 'var(--color-text-muted)' }}>·</span>
-            <span style={{ color: tokenEconomics.savings >= 0 ? 'var(--color-accent-success)' : 'var(--color-accent-error)', fontWeight: 600 }}>
-              {formatTokenCount(tokenEconomics.savings)} net saved ({tokenEconomics.savingsPercent}%)
+            <span style={{ color: 'var(--color-accent-success)', fontWeight: 600 }}>
+              {tokenEconomics.savingsPercent}% compression
             </span>
           </div>
         )}
+
       </div>
 
       {openTooltip && createPortal(

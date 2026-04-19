@@ -119,6 +119,10 @@ export function MemoryAssistPanel({
     () => getSourceStats(scorecardEvents, 'semantic_prompt'),
     [scorecardEvents]
   );
+  const recentSummaryStats = useMemo(
+    () => getSourceStats(scorecardEvents, 'semantic_summary'),
+    [scorecardEvents]
+  );
   const recentFileStats = useMemo(
     () => getSourceStats(scorecardEvents, 'file_context'),
     [scorecardEvents]
@@ -169,6 +173,7 @@ export function MemoryAssistPanel({
       }
     : recentOverallStats;
   const promptStats = feedbackStats?.sourceStats?.semantic_prompt ?? recentPromptStats;
+  const summaryStats = feedbackStats?.sourceStats?.semantic_summary ?? recentSummaryStats;
   const fileStats = feedbackStats?.sourceStats?.file_context ?? recentFileStats;
 
   const selectedTraceEvent = useMemo(() => {
@@ -540,6 +545,7 @@ export function MemoryAssistPanel({
         windowDays={windowDays}
         overallStats={overallStats}
         promptStats={promptStats}
+        summaryStats={summaryStats}
         fileStats={fileStats}
         feedbackStats={feedbackStats}
         tokenEconomics={stats.tokenEconomics ?? null}
@@ -550,6 +556,9 @@ export function MemoryAssistPanel({
           setSelectedTraceKey(eventKey(latest, 0));
           setActiveTab('activity');
         }}
+        implicitUseRate={stats.implicitUseRate ?? null}
+        implicitUseCounts={stats.implicitUseCounts ?? null}
+        recentTrend={stats.recentTrend ?? null}
       />
       )}
 

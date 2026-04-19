@@ -194,16 +194,38 @@ export class CustomOpenAIAgent {
             throw new Error('Cannot process summary: memorySessionId not yet captured.');
           }
 
-          const summaryPrompt = buildSummaryPrompt({
-            id: session.sessionDbId,
-            memory_session_id: session.memorySessionId,
-            project: session.project,
-            user_prompt: session.userPrompt,
-            last_assistant_message: message.last_assistant_message || ''
-          }, mode);
+          // Use a minimal prompt that avoids observer-agent framing.
+          // buildSummaryPrompt uses "memory agent / observer" phrasing shared with observation
+          // turns, which conditions gpt-class models to emit <observation> instead of <summary>.
+          const lastMsg = (message.last_assistant_message || '')
+            // Strip XML tags that could prime the model to emit observation-format output
+            .replace(/<\/?observation[^>]*>/gi, '')
+            .replace(/<\/?type[^>]*>/gi, '')
+            .trim();
+          const minimalSummaryPrompt = `Create a progress checkpoint summary for this coding session.
 
-          session.conversationHistory.push({ role: 'user', content: summaryPrompt });
-          const summaryResponse = await this.query(session.conversationHistory, apiKey, baseUrl, model);
+Project: ${session.project}
+User request: ${session.userPrompt || '(not available)'}
+
+Last AI response in the primary session:
+${lastMsg.slice(0, 2000)}${lastMsg.length > 2000 ? '…(truncated)' : ''}
+
+Respond with ONLY this XML block — no other text, no <observation> tags:
+<summary>
+  <request>[Short title: what the user asked for and what was done]</request>
+  <investigated>[What was explored or examined so far]</investigated>
+  <learned>[What was discovered about how things work]</learned>
+  <completed>[What work has been completed or shipped]</completed>
+  <next_steps>[What is actively being worked on or planned next]</next_steps>
+  <notes>[Additional insights about current progress]</notes>
+</summary>`;
+
+          const summaryHistory: ConversationMessage[] = [
+            { role: 'system', content: 'You are a concise progress note-taker. Output ONLY a single <summary>...</summary> XML block. Never output <observation> tags.' },
+            { role: 'user', content: minimalSummaryPrompt }
+          ];
+          const summaryResponse = await this.query(summaryHistory, apiKey, baseUrl, model);
+          const summaryContent = summaryResponse.content || '';
 
           let tokensUsed = 0;
           if (summaryResponse.content) {
@@ -213,7 +235,7 @@ export class CustomOpenAIAgent {
           }
 
           await processAgentResponse(
-            summaryResponse.content || '',
+            summaryContent,
             session,
             this.dbManager,
             this.sessionManager,
@@ -293,7 +315,7 @@ export class CustomOpenAIAgent {
 
   private conversationToMessages(history: ConversationMessage[]): OpenAIMessage[] {
     return history.map(msg => ({
-      role: msg.role === 'assistant' ? 'assistant' : 'user',
+      role: msg.role,
       content: msg.content
     }));
   }

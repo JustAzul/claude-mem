@@ -31,7 +31,7 @@ export type FeedbackStats = MemoryAssistDashboard & MemoryAssistFeedbackStats;
 export type FeedbackLabel = 'helpful' | 'not_helpful';
 
 export interface SourceAssistStats {
-  source: 'semantic_prompt' | 'file_context';
+  source: 'semantic_prompt' | 'semantic_summary' | 'file_context';
   total: number;
   actionable: number;
   injected: number;
@@ -88,11 +88,15 @@ export function formatDateTime(epoch?: number): string | null {
 }
 
 export function sourceLabel(event: MemoryAssistEvent): string {
-  return event.source === 'semantic_prompt' ? 'Prompt memory' : 'File memory';
+  if (event.source === 'semantic_prompt') return 'Prompt memory';
+  if (event.source === 'semantic_summary') return 'Session summary';
+  return 'File memory';
 }
 
-export function sourceHeading(source: 'semantic_prompt' | 'file_context'): string {
-  return source === 'semantic_prompt' ? 'Prompt memory' : 'File memory';
+export function sourceHeading(source: 'semantic_prompt' | 'semantic_summary' | 'file_context'): string {
+  if (source === 'semantic_prompt') return 'Prompt memory';
+  if (source === 'semantic_summary') return 'Session summary';
+  return 'File memory';
 }
 
 export function badgeLabel(event?: MemoryAssistEvent): string {
@@ -136,7 +140,9 @@ export function toneFor(event?: MemoryAssistEvent): { border: string; bg: string
 }
 
 export function semanticThresholdCopy(source: MemoryAssistEvent['source']): string {
-  return source === 'semantic_prompt' ? 'semantic recall' : 'file timeline';
+  if (source === 'semantic_prompt') return 'semantic recall';
+  if (source === 'semantic_summary') return 'session summary recall';
+  return 'file timeline';
 }
 
 export function distanceAssessment(bestDistance: number, threshold: number): {
@@ -355,7 +361,7 @@ export function topSkipReasons(events: MemoryAssistEvent[]): Array<{ reason: str
 
 export function getSourceStats(
   events: MemoryAssistEvent[],
-  source: 'semantic_prompt' | 'file_context'
+  source: 'semantic_prompt' | 'semantic_summary' | 'file_context'
 ): SourceAssistStats {
   const sourceEvents = events.filter((event) => event.source === source);
   const injected = sourceEvents.filter((event) => event.status === 'injected').length;
@@ -382,11 +388,15 @@ export function getSourceStats(
     likelyHelpedRate,
     userConfirmedHelpful,
     userConfirmedHelpfulRate,
-    helped: injected,
+    // `helped` and `helpRate` reflect likely-helpful recalls (judge verdict).
+    // They previously aliased `injected`/`injectRate` by mistake — conflated
+    // injection with helpfulness. Phase B fix: use likelyHelped/likelyHelpedRate
+    // so the CalibrationView and dependent consumers show honest numbers.
+    helped: likelyHelped,
     checkedNoHelp,
     disabled,
     errors,
-    helpRate: injectRate,
+    helpRate: likelyHelpedRate,
     topSkipReasons: topSkipReasons(sourceEvents),
   };
 }

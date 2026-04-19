@@ -29,6 +29,13 @@ import { sanitizeEnv } from '../../supervisor/env-sanitizer.js';
 // @ts-ignore - Agent SDK types may not be available
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
+function extractFilesFromToolInput(toolName: string, toolInput: unknown): string[] {
+  if (!toolInput || typeof toolInput !== 'object') return [];
+  const input = toolInput as Record<string, unknown>;
+  if (typeof input.file_path === 'string') return [input.file_path];
+  return [];
+}
+
 export class SDKAgent {
   private dbManager: DatabaseManager;
   private sessionManager: SessionManager;
@@ -400,6 +407,18 @@ export class SDKAgent {
           session.lastPromptNumber = message.prompt_number;
         }
 
+        const files = extractFilesFromToolInput(
+          message.tool_name ?? '',
+          message.tool_input
+        );
+        const priorObservations = files.length > 0
+          ? this.dbManager.getSessionStore().getPriorObservationsForFiles(
+              files,
+              message._originalTimestamp,
+              3
+            )
+          : [];
+
         const obsPrompt = buildObservationPrompt({
           id: 0, // Not used in prompt
           tool_name: message.tool_name!,
@@ -410,6 +429,7 @@ export class SDKAgent {
         }, {
           userRequest: session.userPrompt ?? null,
           priorAssistantMessage: message.last_assistant_message ?? null,
+          priorObservations,
         });
 
         // Record tool context so processAgentResponse can override LLM-inferred metadata.

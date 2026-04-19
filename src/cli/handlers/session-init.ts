@@ -14,6 +14,7 @@ import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js
 import { USER_SETTINGS_PATH } from '../../shared/paths.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
 import { reportMemoryAssist } from './memory-assist-report.js';
+import { extractLastMessage } from '../../shared/transcript-parser.js';
 
 export const sessionInitHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
@@ -140,6 +141,20 @@ export const sessionInitHandler: EventHandler = {
     let additionalContext = '';
     const semanticThreshold = parseFloat(String(settings.CLAUDE_MEM_SEMANTIC_INJECT_THRESHOLD || '0.35'));
 
+    // Use prior assistant message as semantic query — POC validated 65% RELEVANT vs 21% with raw prompt.
+    // Falls back to user prompt if transcript unavailable or message too short.
+    let semanticQuery = prompt;
+    if (input.transcriptPath) {
+      try {
+        const priorAsst = extractLastMessage(input.transcriptPath, 'assistant', true);
+        if (priorAsst && priorAsst.trim().length >= 80) {
+          semanticQuery = priorAsst.trim();
+        }
+      } catch {
+        // graceful degradation — transcript unreadable, keep prompt as query
+      }
+    }
+
     if (!semanticInject) {
       await reportMemoryAssist({
         source: 'semantic_prompt',
@@ -150,7 +165,7 @@ export const sessionInitHandler: EventHandler = {
         sessionDbId,
         contentSessionId: sessionId,
         platformSource,
-        promptLength: prompt.length,
+        promptLength: semanticQuery.length,
         threshold: Number.isFinite(semanticThreshold) ? semanticThreshold : undefined,
       });
     } else if (prompt === '[media prompt]') {
@@ -166,7 +181,7 @@ export const sessionInitHandler: EventHandler = {
         promptLength: 0,
         threshold: Number.isFinite(semanticThreshold) ? semanticThreshold : undefined,
       });
-    } else if (prompt.length < 20) {
+    } else if (semanticQuery.length < 20) {
       await reportMemoryAssist({
         source: 'semantic_prompt',
         status: 'skipped',
@@ -176,19 +191,19 @@ export const sessionInitHandler: EventHandler = {
         sessionDbId,
         contentSessionId: sessionId,
         platformSource,
-        promptLength: prompt.length,
+        promptLength: semanticQuery.length,
         threshold: Number.isFinite(semanticThreshold) ? semanticThreshold : undefined,
       });
     }
 
-    if (semanticInject && prompt && prompt.length >= 20 && prompt !== '[media prompt]') {
+    if (semanticInject && prompt && semanticQuery.length >= 20 && prompt !== '[media prompt]') {
       try {
         const limit = settings.CLAUDE_MEM_SEMANTIC_INJECT_LIMIT || '5';
         const semanticRes = await workerHttpRequest('/api/context/semantic', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            q: prompt,
+            q: semanticQuery,
             project,
             limit,
             threshold: Number.isFinite(semanticThreshold) ? semanticThreshold : undefined,
@@ -222,9 +237,44 @@ export const sessionInitHandler: EventHandler = {
           sessionDbId,
           contentSessionId: sessionId,
           platformSource,
-          promptLength: prompt.length,
+          promptLength: semanticQuery.length,
           threshold: Number.isFinite(semanticThreshold) ? semanticThreshold : undefined,
         });
+      }
+    }
+
+    // Summary injection: field-filtered (investigated/completed/learned only, no next_steps).
+    // Higher threshold (T=0.65) validated by POC — summaries embed closer than raw observations.
+    if (semanticInject && prompt !== '[media prompt]' && semanticQuery.length >= 20) {
+      try {
+        const summaryThresholdRaw = parseFloat(String(settings.CLAUDE_MEM_SEMANTIC_INJECT_SUMMARY_THRESHOLD || '0.65'));
+        const summaryThreshold = Number.isFinite(summaryThresholdRaw) ? summaryThresholdRaw : 0.65;
+        const summaryRes = await workerHttpRequest('/api/context/semantic', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            q: semanticQuery,
+            project,
+            limit: 2,
+            threshold: summaryThreshold,
+            promptNumber,
+            sessionDbId,
+            contentSessionId: sessionId,
+            platformSource,
+            docType: 'session_summary',
+          })
+        });
+        if (summaryRes.ok) {
+          const data = await summaryRes.json() as { context: string; count: number };
+          if (data.context) {
+            additionalContext = additionalContext
+              ? `${additionalContext}\n\n${data.context}`
+              : data.context;
+            logger.debug('HOOK', `Summary injection: ${data.count} summaries`, { sessionId: sessionDbId });
+          }
+        }
+      } catch {
+        // Graceful degradation — summary injection is optional
       }
     }
 

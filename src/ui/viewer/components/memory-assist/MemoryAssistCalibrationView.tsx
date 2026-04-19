@@ -2,7 +2,7 @@ import React from 'react';
 import type { FeedbackStats } from './shared';
 import { formatTokenCount, sourceHeading } from './shared';
 
-type MemorySourceFilter = 'all' | 'semantic_prompt' | 'file_context';
+type MemorySourceFilter = 'all' | 'semantic_prompt' | 'semantic_summary' | 'file_context';
 
 interface MemoryAssistCalibrationViewProps {
   dashboard: FeedbackStats | null;
@@ -139,13 +139,14 @@ export function MemoryAssistCalibrationView({
       topSkipReasons: [
         ...mergeTopSkipReasons([
           dashboard.sourceStats.semantic_prompt.topSkipReasons,
+          dashboard.sourceStats.semantic_summary.topSkipReasons,
           dashboard.sourceStats.file_context.topSkipReasons,
         ]),
       ],
       verdicts: {
-        likely_helped: dashboard.sourceStats.semantic_prompt.verdicts.likely_helped + dashboard.sourceStats.file_context.verdicts.likely_helped,
-        unclear: dashboard.sourceStats.semantic_prompt.verdicts.unclear + dashboard.sourceStats.file_context.verdicts.unclear,
-        likely_not_helped: dashboard.sourceStats.semantic_prompt.verdicts.likely_not_helped + dashboard.sourceStats.file_context.verdicts.likely_not_helped,
+        likely_helped: dashboard.sourceStats.semantic_prompt.verdicts.likely_helped + dashboard.sourceStats.semantic_summary.verdicts.likely_helped + dashboard.sourceStats.file_context.verdicts.likely_helped,
+        unclear: dashboard.sourceStats.semantic_prompt.verdicts.unclear + dashboard.sourceStats.semantic_summary.verdicts.unclear + dashboard.sourceStats.file_context.verdicts.unclear,
+        likely_not_helped: dashboard.sourceStats.semantic_prompt.verdicts.likely_not_helped + dashboard.sourceStats.semantic_summary.verdicts.likely_not_helped + dashboard.sourceStats.file_context.verdicts.likely_not_helped,
       },
       estimatedInjectedTokens: dashboard.estimatedInjectedTokens,
       helpfulRecallsPer1kInjectedTokens: dashboard.helpfulRecallsPer1kInjectedTokens,
@@ -266,6 +267,7 @@ export function MemoryAssistCalibrationView({
             >
               <option value="all">All memory sources</option>
               <option value="semantic_prompt">Prompt memory</option>
+              <option value="semantic_summary">Session summary</option>
               <option value="file_context">File memory</option>
             </select>
           </label>

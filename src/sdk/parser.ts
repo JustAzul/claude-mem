@@ -12,6 +12,7 @@ export interface ParsedObservation {
   original_type?: string | null;
   normalized_type_strategy?: 'alias' | 'fallback' | null;
   fallback_type?: string | null;
+  pre_gate_type?: string | null;
   title: string | null;
   subtitle: string | null;
   facts: string[];
@@ -95,6 +96,14 @@ export function parseObservations(text: string, correlationId?: string): ParsedO
         type: finalType,
         originalConcepts: concepts,
         cleanedConcepts
+      });
+    }
+
+    if (cleanedConcepts.length === 0) {
+      logger.warn('PARSER', 'Observation has empty concepts — LLM may have omitted <concepts> block', {
+        correlationId,
+        type: finalType,
+        title
       });
     }
 

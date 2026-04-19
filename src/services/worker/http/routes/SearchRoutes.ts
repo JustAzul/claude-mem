@@ -274,6 +274,7 @@ export class SearchRoutes extends BaseRouteHandler {
     const sessionDbId = req.body?.sessionDbId ? parseInt(String(req.body.sessionDbId), 10) : undefined;
     const contentSessionId = (req.body?.contentSessionId || req.query.contentSessionId) as string | undefined;
     const platformSource = (req.body?.platformSource || req.query.platformSource) as string | undefined;
+    const docType = (req.body?.docType || req.query.docType) as string | undefined;
 
     const result = await this.semanticAssistService.evaluate({
       query,
@@ -284,6 +285,7 @@ export class SearchRoutes extends BaseRouteHandler {
       sessionDbId: Number.isFinite(sessionDbId) ? sessionDbId : undefined,
       contentSessionId,
       platformSource,
+      docType,
     });
 
     if (result.decision.status === 'error') {

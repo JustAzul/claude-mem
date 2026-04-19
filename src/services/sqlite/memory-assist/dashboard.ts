@@ -322,12 +322,74 @@ function buildProjectSourceStats(
   };
 }
 
+interface ImplicitSignalCountRow {
+  signal_kind: string;
+  cnt: number;
+}
+
+function computeImplicitUseCounts(
+  db: Database,
+  windowEpoch: number
+): {
+  file_reuse: number;
+  content_cited: number;
+  no_overlap: number;
+  not_yet_computed: number;
+  implicitUseRate: number | null;
+} {
+  // Count distinct decisions in window that have each signal kind
+  const rows = db.prepare(`
+    SELECT s.signal_kind, COUNT(DISTINCT s.decision_id) as cnt
+    FROM memory_implicit_signals s
+    JOIN memory_assist_decisions d ON d.id = s.decision_id
+    WHERE d.status = 'injected' AND d.created_at_epoch >= ?
+    GROUP BY s.signal_kind
+  `).all(windowEpoch) as ImplicitSignalCountRow[];
+
+  const signalMap: Record<string, number> = {};
+  for (const row of rows) {
+    signalMap[row.signal_kind] = row.cnt;
+  }
+
+  // Total injected decisions in window
+  const totalInjectedRow = db.prepare(`
+    SELECT COUNT(*) as cnt FROM memory_assist_decisions
+    WHERE status = 'injected' AND created_at_epoch >= ?
+  `).get(windowEpoch) as { cnt: number };
+  const totalInjected = totalInjectedRow.cnt;
+
+  // Distinct injected decisions that have ANY signal row
+  const computedRow = db.prepare(`
+    SELECT COUNT(DISTINCT d.id) as cnt
+    FROM memory_assist_decisions d
+    JOIN memory_implicit_signals s ON s.decision_id = d.id
+    WHERE d.status = 'injected' AND d.created_at_epoch >= ?
+  `).get(windowEpoch) as { cnt: number };
+  const computedCount = computedRow.cnt;
+
+  const file_reuse = signalMap['file_reuse'] ?? 0;
+  const content_cited = signalMap['content_cited'] ?? 0;
+  const no_overlap = signalMap['no_overlap'] ?? 0;
+  const not_yet_computed = Math.max(0, totalInjected - computedCount);
+
+  const usedCount = file_reuse + content_cited;
+
+  return {
+    file_reuse,
+    content_cited,
+    no_overlap,
+    not_yet_computed,
+    implicitUseRate: roundPercent(usedCount, computedCount),
+  };
+}
+
 export function getMemoryAssistDashboard(
   db: Database,
   decisions: MemoryAssistDecisionRecord[],
   windowDays = 30
 ): MemoryAssistDashboard & ObservationFeedbackStats {
   const promptDecisions = decisions.filter((decision) => decision.source === 'semantic_prompt');
+  const summaryDecisions = decisions.filter((decision) => decision.source === 'semantic_summary');
   const fileDecisions = decisions.filter((decision) => decision.source === 'file_context');
   const injected = decisions.filter((decision) => decision.status === 'injected').length;
   const checkedNoInject = decisions.filter((decision) => decision.status === 'skipped').length;
@@ -337,7 +399,9 @@ export function getMemoryAssistDashboard(
   const taxonomyCorrections = getObservationTypeCorrectionStats(db, windowDays);
   const userConfirmedHelpful = decisions.filter((decision) => decision.userFeedback === 'helpful').length;
   const userConfirmedNotHelpful = decisions.filter((decision) => decision.userFeedback === 'not_helpful').length;
+  const windowEpoch = Date.now() - windowDays * 24 * 60 * 60 * 1000;
   const globalObservationCount = countObservationsInWindow(db, windowDays);
+  const implicitStats = computeImplicitUseCounts(db, windowEpoch);
   const globalSegment = buildSegmentStats(decisions, taxonomyCorrections.total, {
     scope: 'global',
     key: 'global',
@@ -359,7 +423,7 @@ export function getMemoryAssistDashboard(
   ) as Record<string, MemoryAssistProjectStats>;
 
   const projectSourceEntries = availableProjects.flatMap((project) => {
-    return (['semantic_prompt', 'file_context'] as const).map((source) => {
+    return (['semantic_prompt', 'semantic_summary', 'file_context'] as const).map((source) => {
       const scopedDecisions = decisions.filter(
         (decision) => decision.project === project && decision.source === source
       );
@@ -370,8 +434,28 @@ export function getMemoryAssistDashboard(
 
   const sourceStats = {
     semantic_prompt: buildSourceStats('semantic_prompt', promptDecisions, null),
+    semantic_summary: buildSourceStats('semantic_summary', summaryDecisions, null),
     file_context: buildSourceStats('file_context', fileDecisions, null),
-  } satisfies Record<'semantic_prompt' | 'file_context', MemoryAssistSourceStats>;
+  } satisfies Record<'semantic_prompt' | 'semantic_summary' | 'file_context', MemoryAssistSourceStats>;
+
+  // Last-hour snapshot — exposes bimodal workload the 30d aggregate hides.
+  // Decline perception often comes from looking at a static aggregate without
+  // seeing that recent hours are trending up or down. Rendered as a subtitle
+  // badge in the UI next to each main rate.
+  const recentCutoff = Date.now() - 60 * 60 * 1000;
+  const recentDecisions = decisions.filter((d) => d.createdAtEpoch >= recentCutoff);
+  const recentInjected = recentDecisions.filter((d) => d.status === 'injected').length;
+  const recentSkipped = recentDecisions.filter((d) => d.status === 'skipped').length;
+  const recentActionable = recentInjected + recentSkipped;
+  const recentLikelyHelped = recentDecisions.filter((d) => d.systemVerdict === 'likely_helped').length;
+  const recentTrend = {
+    sinceEpoch: recentCutoff,
+    totalDecisions: recentDecisions.length,
+    injectRate: roundPercent(recentInjected, recentActionable),
+    likelyHelpedRate: roundPercent(recentLikelyHelped, recentActionable),
+    injected: recentInjected,
+    actionable: recentActionable,
+  };
 
   const dashboard = {
     windowDays,
@@ -380,6 +464,7 @@ export function getMemoryAssistDashboard(
     injectRate: roundPercent(injected, actionable),
     likelyHelped,
     likelyHelpedRate: roundPercent(likelyHelped, actionable),
+    recentTrend,
     userConfirmedHelpfulRate: roundPercent(userConfirmedHelpful, userConfirmedHelpful + userConfirmedNotHelpful),
     estimatedInjectedTokens: globalSegment.estimatedInjectedTokens,
     helpfulRecallsPer1kInjectedTokens: globalSegment.helpfulRecallsPer1kInjectedTokens,
@@ -407,7 +492,14 @@ export function getMemoryAssistDashboard(
     taxonomyCorrections,
     shadowRanking: buildShadowRankingStats(promptDecisions),
     recommendation: globalSegment.recommendation,
+    implicitUseRate: implicitStats.implicitUseRate,
+    implicitUseCounts: {
+      file_reuse: implicitStats.file_reuse,
+      content_cited: implicitStats.content_cited,
+      no_overlap: implicitStats.no_overlap,
+      not_yet_computed: implicitStats.not_yet_computed,
+    },
   };
-  logger.debug(`[memory-assist-dashboard] built dashboard for ${windowDays}d window using ${decisions.length} decisions across ${availableProjects.length} projects`);
+  logger.debug('DB', `memory-assist-dashboard: built for ${windowDays}d window using ${decisions.length} decisions across ${availableProjects.length} projects`);
   return dashboard;
 }

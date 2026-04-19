@@ -1,4 +1,4 @@
-export type MemoryAssistSource = 'semantic_prompt' | 'file_context' | 'session_start';
+export type MemoryAssistSource = 'semantic_prompt' | 'semantic_summary' | 'file_context' | 'session_start';
 
 export type MemoryAssistStatus = 'injected' | 'skipped' | 'disabled' | 'error';
 
@@ -68,6 +68,7 @@ export interface MemoryAssistEvent {
   contentSessionId?: string;
   candidateCount?: number;
   selectedCount?: number;
+  selectedIds?: number[];
   threshold?: number;
   bestDistance?: number | null;
   worstDistance?: number | null;
@@ -282,6 +283,21 @@ export interface MemoryAssistDashboard {
   };
   shadowRanking: MemoryAssistShadowRankingStats | null;
   recommendation: MemoryAssistCalibrationRecommendation;
+  implicitUseRate: number | null;
+  implicitUseCounts: {
+    file_reuse: number;
+    content_cited: number;
+    no_overlap: number;
+    not_yet_computed: number;
+  };
+  recentTrend: {
+    sinceEpoch: number;
+    totalDecisions: number;
+    injectRate: number | null;
+    likelyHelpedRate: number | null;
+    injected: number;
+    actionable: number;
+  };
 }
 
 export interface MemoryAssistCalibrationRecord {

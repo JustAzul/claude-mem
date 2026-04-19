@@ -43,6 +43,7 @@ import {
   getDecisionRowsForIds,
   getMemoryAssistDecisionsForPrompt,
   getRecentMemoryAssistDecisions,
+  getRecentlyInjectedIds,
   recordMemoryAssistDecision,
   updateMemoryAssistDecisionVerdict,
 } from './memory-assist/decisions.js';
@@ -102,6 +103,34 @@ function collectDecisionPaths(decision: MemoryAssistDecisionRecord): Set<string>
   return paths;
 }
 
+function pickMostRecent(decisions: MemoryAssistDecisionRecord[]): MemoryAssistDecisionRecord {
+  let winner = decisions[0];
+  for (let i = 1; i < decisions.length; i++) {
+    if (decisions[i].createdAtEpoch > winner.createdAtEpoch) {
+      winner = decisions[i];
+    }
+  }
+  return winner;
+}
+
+function pickNearestInTime(
+  decisions: MemoryAssistDecisionRecord[],
+  timestampMs: number
+): MemoryAssistDecisionRecord {
+  let bestBefore: MemoryAssistDecisionRecord | null = null;
+  let bestBeforeDelta = Infinity;
+  for (const d of decisions) {
+    if (d.createdAtEpoch <= timestampMs) {
+      const delta = timestampMs - d.createdAtEpoch;
+      if (delta < bestBeforeDelta) {
+        bestBefore = d;
+        bestBeforeDelta = delta;
+      }
+    }
+  }
+  return bestBefore ?? pickMostRecent(decisions);
+}
+
 function resolveCreateSessionArgs(
   customTitle?: string,
   platformSource?: string
@@ -157,6 +186,8 @@ export class SessionStore {
     this.addCaptureSnapshotTables();
     this.addObservationContextOriginFields();
     this.addMcpInvocationsTable();
+    this.addMemoryImplicitSignalsTable();
+    this.addLlmRawTypeColumn();
   }
 
   /**
@@ -1387,6 +1418,101 @@ export class SessionStore {
   }
 
   /**
+   * Create memory_implicit_signals table for implicit use tracking (migration 33)
+   *
+   * Duplicates MigrationRunner.migrateToV33 so the worker's SessionStore path
+   * (the one actually invoked at production startup) applies the schema.
+   * See the migrations/runner.ts docblock for the dual-path rationale.
+   *
+   * Stores file_reuse and content_cited signals computed after injection events,
+   * enabling direct evidence of whether injected memory was actually used.
+   *
+   * Idempotent: checks table existence before DDL to handle fresh DBs where
+   * CREATE TABLE IF NOT EXISTS makes the schema_versions guard unnecessary for
+   * the DDL itself, but we still skip if both version row AND table exist.
+   */
+  private addMemoryImplicitSignalsTable(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(33) as SchemaVersion | undefined;
+    const tableCheck = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memory_implicit_signals'").get() as { name: string } | undefined;
+
+    if (applied && tableCheck) return;
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS memory_implicit_signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        decision_id INTEGER NOT NULL,
+        observation_id INTEGER NOT NULL,
+        signal_kind TEXT NOT NULL CHECK(signal_kind IN ('file_reuse', 'content_cited', 'no_overlap')),
+        evidence TEXT,
+        confidence REAL,
+        computed_at_epoch INTEGER NOT NULL,
+        FOREIGN KEY (decision_id) REFERENCES memory_assist_decisions(id),
+        FOREIGN KEY (observation_id) REFERENCES observations(id)
+      )
+    `);
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_mis_decision ON memory_implicit_signals(decision_id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_mis_obs ON memory_implicit_signals(observation_id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_mis_kind_time ON memory_implicit_signals(signal_kind, computed_at_epoch DESC)');
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(33, new Date().toISOString());
+    logger.debug('DB', 'SessionStore: migration V33 complete (memory_implicit_signals table)');
+  }
+
+  /**
+   * Duplicates MigrationRunner.migrateToV34 so the worker's SessionStore path
+   * (the one actually invoked at production startup) applies the schema.
+   * Adds llm_raw_type column to observation_capture_snapshots to track pre-gate types.
+   */
+  private addLlmRawTypeColumn(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(34) as SchemaVersion | undefined;
+    if (applied) return;
+
+    this.db.run(`ALTER TABLE observation_capture_snapshots ADD COLUMN llm_raw_type TEXT`);
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(34, new Date().toISOString());
+    logger.debug('DB', 'SessionStore: migration V34 complete (llm_raw_type column on observation_capture_snapshots)');
+  }
+
+  /**
+   * Returns decisions with status='injected' for this session that don't yet
+   * have any row in memory_implicit_signals.
+   */
+  getUncomputedDecisionsForSession(
+    contentSessionId: string,
+    limit = 50
+  ): Array<{ decision_id: number; trace_items_json: string | null; created_at_epoch: number }> {
+    return this.db.prepare(`
+      SELECT d.id as decision_id, d.trace_items_json, d.created_at_epoch
+      FROM memory_assist_decisions d
+      WHERE d.content_session_id = ?
+        AND d.status = 'injected'
+        AND NOT EXISTS (
+          SELECT 1 FROM memory_implicit_signals s WHERE s.decision_id = d.id
+        )
+      ORDER BY d.created_at_epoch DESC
+      LIMIT ?
+    `).all(contentSessionId, limit) as Array<{ decision_id: number; trace_items_json: string | null; created_at_epoch: number }>;
+  }
+
+  /**
+   * Insert a single implicit signal row. No dedup guard here — callers
+   * (persistImplicitSignals) are responsible for filtering duplicates.
+   */
+  insertImplicitSignal(
+    decisionId: number,
+    observationId: number,
+    kind: 'file_reuse' | 'content_cited' | 'no_overlap',
+    evidence: string | null,
+    confidence: number,
+    computedAtEpoch: number
+  ): void {
+    this.db.prepare(`
+      INSERT INTO memory_implicit_signals
+        (decision_id, observation_id, signal_kind, evidence, confidence, computed_at_epoch)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(decisionId, observationId, kind, evidence, confidence, computedAtEpoch);
+  }
+
+  /**
    * Update the memory session ID for a session
    * Called by SDKAgent when it captures the session ID from the first SDK message
    * Also used to RESET to null on stale resume failures (worker-service.ts)
@@ -1877,6 +2003,14 @@ export class SessionStore {
     return getRecentMemoryAssistDecisions(this.db, options);
   }
 
+  getRecentlyInjectedIds(
+    contentSessionId: string,
+    currentPromptNumber: number,
+    windowSize: number
+  ): Set<number> {
+    return getRecentlyInjectedIds(this.db, contentSessionId, currentPromptNumber, windowSize);
+  }
+
   recordMemoryAssistOutcomeSignal(signal: MemoryAssistOutcomeSignal): MemoryAssistOutcomeSignal {
     const promptNumber = signal.promptNumber
       ?? (typeof signal.metadata?.promptNumber === 'number' ? signal.metadata.promptNumber : undefined);
@@ -1897,6 +2031,78 @@ export class SessionStore {
     }
 
     return persisted;
+  }
+
+  /**
+   * Retroactively link an orphan outcome_signal (decision_id IS NULL) to a decision
+   * using the current resolver. Used by scripts/backfill-outcome-signal-links.mjs.
+   * Returns the newly-linked decisionId, or null if no candidate was resolvable.
+   */
+  relinkOrphanOutcomeSignal(signalId: number): number | null {
+    const row = this.db.prepare(`
+      SELECT content_session_id, prompt_number, file_path, related_file_paths_json,
+             concepts_json, tool_name, action, signal_type, created_at_epoch
+      FROM memory_assist_outcome_signals
+      WHERE id = ? AND decision_id IS NULL
+    `).get(signalId) as {
+      content_session_id: string | null;
+      prompt_number: number | null;
+      file_path: string | null;
+      related_file_paths_json: string | null;
+      concepts_json: string | null;
+      tool_name: string;
+      action: string;
+      signal_type: string;
+      created_at_epoch: number;
+    } | undefined;
+
+    if (!row || !row.content_session_id || !row.prompt_number) {
+      return null;
+    }
+
+    const relatedFilePaths = row.related_file_paths_json
+      ? (JSON.parse(row.related_file_paths_json) as string[])
+      : [];
+    const concepts = row.concepts_json ? (JSON.parse(row.concepts_json) as string[]) : [];
+
+    const synthSignal: MemoryAssistOutcomeSignal = {
+      contentSessionId: row.content_session_id,
+      promptNumber: row.prompt_number,
+      filePath: row.file_path,
+      relatedFilePaths,
+      concepts,
+      toolName: row.tool_name,
+      action: row.action as MemoryAssistOutcomeSignal['action'],
+      signalType: row.signal_type as MemoryAssistOutcomeSignal['signalType'],
+      timestamp: row.created_at_epoch,
+    };
+
+    const decisionId = this.resolveMemoryAssistDecisionId(synthSignal);
+    if (!decisionId) {
+      return null;
+    }
+
+    this.db.prepare(`
+      UPDATE memory_assist_outcome_signals SET decision_id = ? WHERE id = ?
+    `).run(decisionId, signalId);
+
+    return decisionId;
+  }
+
+  /**
+   * Bulk fetch of orphan outcome_signal ids for the backfill script. Returns ids
+   * only (script calls relinkOrphanOutcomeSignal per id to reuse resolver logic).
+   */
+  listOrphanOutcomeSignalIds(sinceEpoch: number): number[] {
+    const rows = this.db.prepare(`
+      SELECT id FROM memory_assist_outcome_signals
+      WHERE decision_id IS NULL
+        AND content_session_id IS NOT NULL
+        AND prompt_number IS NOT NULL
+        AND created_at_epoch >= ?
+      ORDER BY created_at_epoch ASC
+    `).all(sinceEpoch) as Array<{ id: number }>;
+    return rows.map((r) => r.id);
   }
 
   attachGeneratedObservationsToOutcomeSignal(
@@ -1997,39 +2203,49 @@ export class SessionStore {
       return null;
     }
 
+    // Use the signal's timestamp as the window anchor so backfill replays resolve
+    // identically to live — otherwise historical signals see only "now" and fetch
+    // zero candidates.
+    const signalTimestamp = signal.timestamp ?? Date.now();
     const candidates = getMemoryAssistDecisionsForPrompt(
       this.db,
       signal.contentSessionId,
       signal.promptNumber,
-      15 * 60 * 1000
+      15 * 60 * 1000,
+      signalTimestamp
     );
 
     if (candidates.length === 0) {
       return null;
     }
 
-    const signalPaths = collectSignalPaths(signal);
     const injectedCandidates = candidates.filter((decision) => decision.status === 'injected');
+    if (injectedCandidates.length === 0) {
+      return null;
+    }
+
+    const signalPaths = collectSignalPaths(signal);
     const overlappingFileCandidates = injectedCandidates.filter((decision) => {
       if (decision.source !== 'file_context') return false;
       if (signalPaths.size === 0) return false;
       const decisionPaths = collectDecisionPaths(decision);
       return [...signalPaths].some((path) => decisionPaths.has(path));
     });
-    if (overlappingFileCandidates.length === 1) {
-      return overlappingFileCandidates[0].id;
+    if (overlappingFileCandidates.length > 0) {
+      return pickMostRecent(overlappingFileCandidates).id;
     }
 
     const semanticCandidates = injectedCandidates.filter((decision) => decision.source === 'semantic_prompt');
-    if (semanticCandidates.length === 1) {
-      return semanticCandidates[0].id;
+    if (semanticCandidates.length > 0) {
+      return pickMostRecent(semanticCandidates).id;
     }
 
-    if (injectedCandidates.length === 1) {
-      return injectedCandidates[0].id;
-    }
-
-    return null;
+    // Nearest-in-time fallback: tool calls that don't overlap any injected file path
+    // (e.g. Bash, Grep without path, or a Read outside the injected file set) still
+    // belong to the most likely decision — the one that just fired. Prefer a decision
+    // at-or-before the signal; otherwise fall back to the most recent overall so the
+    // link is never NULL when an injected candidate exists in the window.
+    return pickNearestInTime(injectedCandidates, signalTimestamp).id;
   }
 
   attachMemoryAssistDecisionFeedback(
@@ -2126,7 +2342,12 @@ export class SessionStore {
     recordObservationTypeCorrection(this.db, input);
   }
 
-  private refreshMemoryAssistDecisionVerdict(
+  /**
+   * Re-run the system judge for a decision. Idempotent — safe to call any number of
+   * times. Public so post-hoc backfill tooling (scripts/backfill-outcome-signal-links.mjs)
+   * can refresh verdicts after relinking orphan signals.
+   */
+  refreshMemoryAssistDecisionVerdict(
     decisionId: number,
     feedback?: MemoryAssistFeedbackLabel | null
   ): MemoryAssistDecisionRecord | null {
@@ -2223,6 +2444,44 @@ export class SessionStore {
     `);
 
     return stmt.all(...params) as ObservationRecord[];
+  }
+
+  /**
+   * Returns up to `limit` chronologically oldest observations that touched any of
+   * the given files, created before `beforeEpoch`. Used to inject file-context
+   * timeline into observation prompts.
+   */
+  getPriorObservationsForFiles(
+    files: string[],
+    beforeEpoch: number,
+    limit = 3
+  ): string[] {
+    if (files.length === 0) return [];
+
+    const conditions = files
+      .map(() =>
+        `(EXISTS (SELECT 1 FROM json_each(files_read) WHERE value LIKE ?) OR
+          EXISTS (SELECT 1 FROM json_each(files_modified) WHERE value LIKE ?))`
+      )
+      .join(' OR ');
+
+    const params: unknown[] = files.flatMap(f => [`%${f}%`, `%${f}%`]);
+
+    const rows = this.db.prepare(`
+      SELECT type, title, created_at_epoch
+      FROM observations
+      WHERE (${conditions}) AND created_at_epoch < ?
+      ORDER BY created_at_epoch ASC
+      LIMIT ?
+    `).all(...params, beforeEpoch, limit) as Array<{
+      type: string; title: string | null; created_at_epoch: number;
+    }>;
+
+    return rows.map(r => {
+      const time = new Date(r.created_at_epoch)
+        .toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+      return `${time} [${r.type}] ${(r.title ?? '').slice(0, 100)}`;
+    });
   }
 
   /**
