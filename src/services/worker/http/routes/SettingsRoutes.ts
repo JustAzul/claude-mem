@@ -131,6 +131,10 @@ export class SettingsRoutes extends BaseRouteHandler {
       // Feature Toggles
       'CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY',
       'CLAUDE_MEM_CONTEXT_SHOW_LAST_MESSAGE',
+      'CLAUDE_MEM_SEMANTIC_INJECT',
+      'CLAUDE_MEM_SEMANTIC_INJECT_LIMIT',
+      'CLAUDE_MEM_SEMANTIC_INJECT_THRESHOLD',
+      'CLAUDE_MEM_RECOMMENDER_PAUSED',
       'CLAUDE_MEM_FOLDER_CLAUDEMD_ENABLED',
     ];
 
@@ -324,6 +328,7 @@ export class SettingsRoutes extends BaseRouteHandler {
       'CLAUDE_MEM_CONTEXT_SHOW_SAVINGS_PERCENT',
       'CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY',
       'CLAUDE_MEM_CONTEXT_SHOW_LAST_MESSAGE',
+      'CLAUDE_MEM_SEMANTIC_INJECT',
     ];
 
     for (const key of booleanSettings) {
@@ -345,6 +350,20 @@ export class SettingsRoutes extends BaseRouteHandler {
       const count = parseInt(settings.CLAUDE_MEM_CONTEXT_SESSION_COUNT, 10);
       if (isNaN(count) || count < 1 || count > 50) {
         return { valid: false, error: 'CLAUDE_MEM_CONTEXT_SESSION_COUNT must be between 1 and 50' };
+      }
+    }
+
+    if (settings.CLAUDE_MEM_SEMANTIC_INJECT_LIMIT) {
+      const limit = parseInt(settings.CLAUDE_MEM_SEMANTIC_INJECT_LIMIT, 10);
+      if (isNaN(limit) || limit < 1 || limit > 20) {
+        return { valid: false, error: 'CLAUDE_MEM_SEMANTIC_INJECT_LIMIT must be between 1 and 20' };
+      }
+    }
+
+    if (settings.CLAUDE_MEM_SEMANTIC_INJECT_THRESHOLD) {
+      const threshold = parseFloat(settings.CLAUDE_MEM_SEMANTIC_INJECT_THRESHOLD);
+      if (isNaN(threshold) || threshold < 0 || threshold > 2) {
+        return { valid: false, error: 'CLAUDE_MEM_SEMANTIC_INJECT_THRESHOLD must be between 0 and 2' };
       }
     }
 

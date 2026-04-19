@@ -1,13 +1,16 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Header } from './components/Header';
 import { Feed } from './components/Feed';
+import { MemoryAssistPanel } from './components/MemoryAssistPanel';
 import { ContextSettingsModal } from './components/ContextSettingsModal';
 import { LogsDrawer } from './components/LogsModal';
+import { ObservationTraceModal } from './components/ObservationTraceModal';
 import { useSSE } from './hooks/useSSE';
 import { useSettings } from './hooks/useSettings';
 import { useStats } from './hooks/useStats';
 import { usePagination } from './hooks/usePagination';
 import { useTheme } from './hooks/useTheme';
+import { useTraceUrlParam } from './hooks/useTraceUrlParam';
 import { Observation, Summary, UserPrompt } from './types';
 import { mergeAndDeduplicateByProject } from './utils/data';
 
@@ -20,11 +23,12 @@ export function App() {
   const [paginatedSummaries, setPaginatedSummaries] = useState<Summary[]>([]);
   const [paginatedPrompts, setPaginatedPrompts] = useState<UserPrompt[]>([]);
 
-  const { observations, summaries, prompts, projects, sources, projectsBySource, isProcessing, queueDepth, isConnected } = useSSE();
+  const { observations, summaries, prompts, projects, sources, projectsBySource, memoryAssistEvents, isProcessing, queueDepth, isConnected } = useSSE();
   const { settings, saveSettings, isSaving, saveStatus } = useSettings();
   const { stats, refreshStats } = useStats();
   const { preference, resolvedTheme, setThemePreference } = useTheme();
   const pagination = usePagination(currentFilter, currentSource);
+  const [traceObservationId, setTraceObservationId] = useTraceUrlParam();
 
   const availableProjects = useMemo(() => {
     if (currentSource === 'all') {
@@ -123,6 +127,15 @@ export function App() {
         onThemeChange={setThemePreference}
         onContextPreviewToggle={toggleContextPreview}
       />
+      <MemoryAssistPanel
+        events={memoryAssistEvents}
+        semanticInjectEnabled={settings.CLAUDE_MEM_SEMANTIC_INJECT === 'true'}
+        semanticThreshold={settings.CLAUDE_MEM_SEMANTIC_INJECT_THRESHOLD || '0.35'}
+        stats={stats}
+        activeProject={currentFilter || undefined}
+        activePlatformSource={currentSource}
+        onOpenTrace={setTraceObservationId}
+      />
 
       <Feed
         observations={allObservations}
@@ -157,6 +170,13 @@ export function App() {
         isOpen={logsModalOpen}
         onClose={toggleLogsModal}
       />
+
+      {traceObservationId !== null && (
+        <ObservationTraceModal
+          observationId={traceObservationId}
+          onClose={() => setTraceObservationId(null)}
+        />
+      )}
     </>
   );
 }

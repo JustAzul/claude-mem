@@ -236,4 +236,33 @@ describe('fileContextHandler — cache validation fix (#1719)', () => {
     expect(ctx).toContain('The requested section was read normally');
     expect(ctx).not.toContain('Only line 1 was read');
   });
+
+  it('reports estimated injected tokens when file memory is injected', async () => {
+    const future = Date.now() + 60_000;
+    let capturedReport: Record<string, unknown> | null = null;
+
+    fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/api/observations/by-file')) {
+        return makeObservationsResponse([{ id: 1, created_at_epoch: future }]);
+      }
+      if (url.includes('/api/memory-assist/report')) {
+        capturedReport = JSON.parse(String(init?.body ?? '{}'));
+        return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+
+    const result = await fileContextHandler.execute({
+      sessionId: 'sess',
+      cwd: tmpDir,
+      toolName: 'Read',
+      toolInput: { file_path: testFile },
+    });
+
+    expect(result.hookSpecificOutput).toBeDefined();
+    expect(capturedReport?.status).toBe('injected');
+    expect(typeof capturedReport?.estimatedInjectedTokens).toBe('number');
+    expect(Number(capturedReport?.estimatedInjectedTokens)).toBeGreaterThan(0);
+  });
 });

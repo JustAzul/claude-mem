@@ -11,21 +11,52 @@
  * 4. Directory doesn't exist - should create directory and file
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, mock } from 'bun:test';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { SettingsDefaultsManager } from '../../src/shared/SettingsDefaultsManager.js';
+import { fileURLToPath, pathToFileURL } from 'url';
+
+const settingsManagerSourcePath = fileURLToPath(
+  new URL('../../src/shared/SettingsDefaultsManager.ts', import.meta.url)
+);
 
 describe('SettingsDefaultsManager', () => {
+  let SettingsDefaultsManager: typeof import('../../src/shared/SettingsDefaultsManager').SettingsDefaultsManager;
   let tempDir: string;
   let settingsPath: string;
+  let envSnapshot: Record<string, string | undefined>;
+  let managedEnvKeys: string[];
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    mock.restore();
+    managedEnvKeys = [
+      ...Object.keys(process.env).filter((key) => key.startsWith('CLAUDE_MEM_')),
+      'CLAUDE_CODE_PATH',
+      'CLAUDE_MEM_WORKER_PORT',
+      'CLAUDE_MEM_MODEL',
+      'CLAUDE_MEM_LOG_LEVEL',
+    ];
+    managedEnvKeys = [...new Set(managedEnvKeys)];
+
+    envSnapshot = Object.fromEntries(
+      managedEnvKeys.map((key) => [key, process.env[key]])
+    );
+    for (const key of managedEnvKeys) {
+      delete process.env[key];
+    }
+
     // Create unique temp directory for each test
     tempDir = join(tmpdir(), `settings-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     mkdirSync(tempDir, { recursive: true });
     settingsPath = join(tempDir, 'settings.json');
+
+    const transpiler = new Bun.Transpiler({ loader: 'ts' });
+    const source = readFileSync(settingsManagerSourcePath, 'utf-8');
+    const compiled = transpiler.transformSync(source);
+    const isolatedModulePath = join(tempDir, `SettingsDefaultsManager.${Date.now()}.mjs`);
+    writeFileSync(isolatedModulePath, compiled, 'utf-8');
+    ({ SettingsDefaultsManager } = await import(pathToFileURL(isolatedModulePath).href));
   });
 
   afterEach(() => {
@@ -34,6 +65,15 @@ describe('SettingsDefaultsManager', () => {
       rmSync(tempDir, { recursive: true, force: true });
     } catch {
       // Ignore cleanup errors
+    }
+
+    for (const key of managedEnvKeys) {
+      const value = envSnapshot[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
     }
   });
 

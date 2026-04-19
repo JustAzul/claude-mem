@@ -163,11 +163,17 @@ export class Server {
   private setupCoreRoutes(): void {
     // Health check endpoint - always responds, even during initialization
     this.app.get('/api/health', (_req: Request, res: Response) => {
+      // process.uptime() returns seconds since THIS process started — ground truth
+      // for "did I restart?" checks. Previously `uptime` was Date.now() - startTime
+      // in milliseconds, which was easy to misread as seconds and obscured restart
+      // verification. Keep both unit-tagged names so callers never guess.
+      const uptimeSeconds = Math.round(process.uptime());
       res.status(200).json({
         status: 'ok',
         version: BUILT_IN_VERSION,
         workerPath: this.options.workerPath,
-        uptime: Date.now() - this.startTime,
+        uptime: uptimeSeconds,
+        uptimeSeconds,
         managed: process.env.CLAUDE_MEM_MANAGED === 'true',
         hasIpc: typeof process.send === 'function',
         platform: process.platform,

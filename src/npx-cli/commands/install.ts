@@ -16,7 +16,15 @@ import { join } from 'path';
 // Non-TTY detection: @clack/prompts crashes with ENOENT in non-TTY environments
 const isInteractive = process.stdin.isTTY === true;
 
-/** Run a list of tasks, falling back to plain console.log when non-TTY */
+function writeStdout(message: string): void {
+  process.stdout.write(`${message}\n`);
+}
+
+function writeStderr(message: string): void {
+  process.stderr.write(`${message}\n`);
+}
+
+/** Run a list of tasks, falling back to plain stdout writes when non-TTY. */
 interface TaskDescriptor {
   title: string;
   task: (message: (msg: string) => void) => Promise<string>;
@@ -27,18 +35,18 @@ async function runTasks(tasks: TaskDescriptor[]): Promise<void> {
     await p.tasks(tasks);
   } else {
     for (const t of tasks) {
-      const result = await t.task((msg: string) => console.log(`  ${msg}`));
-      console.log(`  ${result}`);
+      const result = await t.task((msg: string) => writeStdout(`  ${msg}`));
+      writeStdout(`  ${result}`);
     }
   }
 }
 
-/** Log helpers that fall back to console.log in non-TTY */
+/** Log helpers that fall back to stdout/stderr in non-TTY environments. */
 const log = {
-  info: (msg: string) => isInteractive ? p.log.info(msg) : console.log(`  ${msg}`),
-  success: (msg: string) => isInteractive ? p.log.success(msg) : console.log(`  ${msg}`),
-  warn: (msg: string) => isInteractive ? p.log.warn(msg) : console.warn(`  ${msg}`),
-  error: (msg: string) => isInteractive ? p.log.error(msg) : console.error(`  ${msg}`),
+  info: (msg: string) => isInteractive ? p.log.info(msg) : writeStdout(`  ${msg}`),
+  success: (msg: string) => isInteractive ? p.log.success(msg) : writeStdout(`  ${msg}`),
+  warn: (msg: string) => isInteractive ? p.log.warn(msg) : writeStderr(`  ${msg}`),
+  error: (msg: string) => isInteractive ? p.log.error(msg) : writeStderr(`  ${msg}`),
 };
 import {
   claudeSettingsPath,
@@ -393,7 +401,7 @@ export async function runInstallCommand(options: InstallOptions = {}): Promise<v
   if (isInteractive) {
     p.intro(pc.bgCyan(pc.black(' claude-mem install ')));
   } else {
-    console.log('claude-mem install');
+    writeStdout('claude-mem install');
   }
   log.info(`Version: ${pc.cyan(version)}`);
   log.info(`Platform: ${process.platform} (${process.arch})`);
@@ -532,8 +540,8 @@ export async function runInstallCommand(options: InstallOptions = {}): Promise<v
   if (isInteractive) {
     p.note(summaryLines.join('\n'), installStatus);
   } else {
-    console.log(`\n  ${installStatus}`);
-    summaryLines.forEach(l => console.log(`  ${l}`));
+    writeStdout(`\n  ${installStatus}`);
+    summaryLines.forEach((line) => writeStdout(`  ${line}`));
   }
 
   const workerPort = process.env.CLAUDE_MEM_WORKER_PORT || '37777';
@@ -552,13 +560,13 @@ export async function runInstallCommand(options: InstallOptions = {}): Promise<v
       p.outro(pc.green('claude-mem installed successfully!'));
     }
   } else {
-    console.log('\n  Next Steps');
-    nextSteps.forEach(l => console.log(`  ${l}`));
+    writeStdout('\n  Next Steps');
+    nextSteps.forEach((line) => writeStdout(`  ${line}`));
     if (failedIDEs.length > 0) {
-      console.log('\nclaude-mem installed with some IDE setup failures.');
+      writeStdout('\nclaude-mem installed with some IDE setup failures.');
       process.exitCode = 1;
     } else {
-      console.log('\nclaude-mem installed successfully!');
+      writeStdout('\nclaude-mem installed successfully!');
     }
   }
 }

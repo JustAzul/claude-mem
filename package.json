@@ -41,6 +41,7 @@
     "./modes/*": "./plugin/modes/*"
   },
   "files": [
+    "plugin",
     "dist",
     "plugin/.claude-plugin",
     "plugin/CLAUDE.md",
@@ -73,6 +74,7 @@
     "worker:stop": "bun plugin/scripts/worker-service.cjs stop",
     "worker:restart": "bun plugin/scripts/worker-service.cjs restart",
     "worker:status": "bun plugin/scripts/worker-service.cjs status",
+    "memory-assist:validate": "node scripts/memory-assist-validate-live.mjs",
     "queue": "bun scripts/check-pending-queue.ts",
     "queue:process": "bun scripts/check-pending-queue.ts --process",
     "queue:clear": "bun scripts/clear-failed-queue.ts --all --force",

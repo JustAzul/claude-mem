@@ -5,9 +5,13 @@
 
 import { logger } from '../utils/logger.js';
 import { ModeManager } from '../services/domain/ModeManager.js';
+import { normalizeObservationType } from '../services/domain/ObservationTypeNormalizer.js';
 
 export interface ParsedObservation {
   type: string;
+  original_type?: string | null;
+  normalized_type_strategy?: 'alias' | 'fallback' | null;
+  fallback_type?: string | null;
   title: string | null;
   subtitle: string | null;
   facts: string[];
@@ -15,6 +19,9 @@ export interface ParsedObservation {
   concepts: string[];
   files_read: string[];
   files_modified: string[];
+  why: string | null;
+  alternatives_rejected: string | null;
+  related_observation_ids: number[];
 }
 
 export interface ParsedSummary {
@@ -49,23 +56,32 @@ export function parseObservations(text: string, correlationId?: string): ParsedO
     const concepts = extractArrayElements(obsContent, 'concepts', 'concept');
     const files_read = extractArrayElements(obsContent, 'files_read', 'file');
     const files_modified = extractArrayElements(obsContent, 'files_modified', 'file');
+    const why = extractField(obsContent, 'why');
+    const alternatives_rejected = extractField(obsContent, 'alternatives_rejected');
+
+    // related is an array of <id>integer</id> inside <related>...</related>
+    const relatedRaw = extractArrayElements(obsContent, 'related', 'id');
+    const related_observation_ids: number[] = [];
+    for (const raw of relatedRaw) {
+      const n = Number.parseInt(String(raw).trim(), 10);
+      if (Number.isInteger(n) && n > 0) related_observation_ids.push(n);
+    }
 
     // All fields except type are nullable in schema.
     // If type is missing or invalid, use first type from mode as fallback.
 
-    // Determine final type using active mode's valid types
     const mode = ModeManager.getInstance().getActiveMode();
-    const validTypes = mode.observation_types.map(t => t.id);
-    const fallbackType = validTypes[0]; // First type in mode's list is the fallback
-    let finalType = fallbackType;
-    if (type) {
-      if (validTypes.includes(type.trim())) {
-        finalType = type.trim();
-      } else {
-        logger.error('PARSER', `Invalid observation type: ${type}, using "${fallbackType}"`, { correlationId });
-      }
-    } else {
-      logger.error('PARSER', `Observation missing type field, using "${fallbackType}"`, { correlationId });
+    const normalization = normalizeObservationType(mode, type);
+    const finalType = normalization.finalType;
+
+    if (normalization.originalType == null) {
+      logger.error('PARSER', `Observation missing type field, using "${normalization.fallbackType}"`, { correlationId });
+    } else if (normalization.normalizedFromAlias) {
+      logger.warn('PARSER', `Normalized observation type: ${normalization.originalType} -> "${normalization.finalType}"`, {
+        correlationId,
+      });
+    } else if (normalization.usedFallback) {
+      logger.error('PARSER', `Invalid observation type: ${normalization.originalType}, using "${normalization.fallbackType}"`, { correlationId });
     }
 
     // All other fields are optional - save whatever we have
@@ -97,13 +113,19 @@ export function parseObservations(text: string, correlationId?: string): ParsedO
 
     observations.push({
       type: finalType,
+      original_type: normalization.originalType,
+      normalized_type_strategy: normalization.normalizedFromAlias ? 'alias' : normalization.usedFallback ? 'fallback' : null,
+      fallback_type: normalization.fallbackType,
       title,
       subtitle,
       facts,
       narrative,
       concepts: cleanedConcepts,
       files_read,
-      files_modified
+      files_modified,
+      why,
+      alternatives_rejected,
+      related_observation_ids
     });
   }
 

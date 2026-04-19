@@ -16,6 +16,9 @@ export interface ObservationInput {
   concepts: string[];
   files_read: string[];
   files_modified: string[];
+  why?: string | null;
+  alternatives_rejected?: string | null;
+  related_observation_ids?: number[];
 }
 
 /**

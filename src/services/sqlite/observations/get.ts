@@ -125,7 +125,17 @@ export function getObservationsByFilePath(
   const limit = Number.isInteger(rawLimit) && (rawLimit as number) > 0
     ? Math.min(rawLimit as number, 100)
     : 15;
-  const params: (string | number)[] = [filePath, filePath];
+
+  // files_read / files_modified store absolute paths (captured via tool_input)
+  // but callers (file_context hook) pass a relative path resolved against cwd.
+  // Exact equality (`value = ?`) was failing on that mismatch, producing
+  // `no_observations` for files that in fact had abundant memory — empirical
+  // audit found `src/services/sqlite/memory-assist/dashboard.ts` returning 0
+  // results while 20 stored observations referenced the absolute form of the
+  // same path. Substring LIKE matches either form and is further guarded by
+  // the JSON array structure + project filter.
+  const likePattern = `%${filePath}%`;
+  const params: (string | number)[] = [likePattern, likePattern];
 
   let projectClause = '';
   if (options?.projects?.length) {
@@ -140,13 +150,63 @@ export function getObservationsByFilePath(
     SELECT *
     FROM observations
     WHERE (
-      (files_read LIKE '[%' AND EXISTS (SELECT 1 FROM json_each(files_read) WHERE value = ?))
-      OR (files_modified LIKE '[%' AND EXISTS (SELECT 1 FROM json_each(files_modified) WHERE value = ?))
+      (files_read LIKE '[%' AND EXISTS (SELECT 1 FROM json_each(files_read) WHERE value LIKE ?))
+      OR (files_modified LIKE '[%' AND EXISTS (SELECT 1 FROM json_each(files_modified) WHERE value LIKE ?))
     )
     ${projectClause}
     ORDER BY created_at_epoch DESC
     LIMIT ?
   `);
 
-  return stmt.all(...params) as ObservationRecord[];
+  const directResults = (stmt.all(...params) as ObservationRecord[]).map(r => ({ ...r, via: 'direct' as const }));
+
+  // If primary results fill the budget, skip cross-ref expansion
+  if (directResults.length >= limit) {
+    return directResults.slice(0, limit);
+  }
+
+  // Collect candidate IDs from related_observation_ids of direct results
+  const directIdSet = new Set(directResults.map(r => r.id));
+  const hopCandidateIds = new Set<number>();
+  for (const row of directResults) {
+    const raw = row.related_observation_ids;
+    if (!raw || typeof raw !== 'string') continue;
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) continue;
+      for (const id of parsed) {
+        if (Number.isInteger(id) && id > 0 && !directIdSet.has(id)) {
+          hopCandidateIds.add(id);
+        }
+      }
+    } catch (error: unknown) {
+      logger.debug('OBSERVATIONS', 'Failed to parse related_observation_ids for cross-ref hop', { observationId: row.id });
+    }
+  }
+
+  if (hopCandidateIds.size === 0) return directResults;
+
+  // Budget remaining after direct results
+  const remaining = limit - directResults.length;
+  const hopIds = [...hopCandidateIds].slice(0, remaining);
+  const hopPlaceholders = hopIds.map(() => '?').join(',');
+
+  let hopProjectClause = '';
+  const hopParams: (string | number)[] = [...hopIds];
+  if (options?.projects?.length) {
+    const projPh = options.projects.map(() => '?').join(',');
+    hopProjectClause = `AND project IN (${projPh})`;
+    hopParams.push(...options.projects);
+  }
+
+  const hopStmt = db.prepare(`
+    SELECT *
+    FROM observations
+    WHERE id IN (${hopPlaceholders}) ${hopProjectClause}
+    ORDER BY created_at_epoch DESC
+  `);
+
+  const hopResults = (hopStmt.all(...hopParams) as ObservationRecord[]).map(r => ({ ...r, via: 'cross_ref' as const }));
+
+  return [...directResults, ...hopResults];
 }

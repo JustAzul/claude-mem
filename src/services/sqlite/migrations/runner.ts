@@ -37,6 +37,11 @@ export class MigrationRunner {
     this.addSessionCustomTitleColumn();
     this.createObservationFeedbackTable();
     this.addSessionPlatformSourceColumn();
+    this.createObservationsFTSIndex();
+    this.migrateToV29();
+    this.migrateToV30();
+    this.migrateToV31();
+    this.migrateToV32();
   }
 
   /**
@@ -921,5 +926,350 @@ export class MigrationRunner {
     }
 
     this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(25, new Date().toISOString());
+  }
+
+  /**
+   * Create FTS5 virtual table over observations for BM25 keyword search (migration 28)
+   *
+   * Uses external-content FTS5 so no data is duplicated — the virtual table holds only
+   * the token index. Three DML triggers keep the index in sync with `observations`.
+   * An idempotent backfill runs every startup and inserts any rows not yet indexed.
+   *
+   * Column set matches the trigger definitions in migration 21 exactly:
+   *   title, subtitle, narrative, text, facts, concepts
+   *
+   * Graceful: if FTS5 is somehow unavailable (very rare in bun), logs a warning and
+   * continues without blocking worker startup.
+   */
+  private createObservationsFTSIndex(): void {
+    // Check actual table state — skip the whole method if already set up
+    const hasFTSTable = (this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='observations_fts'"
+    ).all() as { name: string }[]).length > 0;
+
+    try {
+      if (!hasFTSTable) {
+        // Create the FTS5 external-content virtual table
+        this.db.run(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
+            title, subtitle, narrative, text, facts, concepts,
+            content='observations', content_rowid='id',
+            tokenize='porter unicode61'
+          )
+        `);
+
+        // INSERT trigger
+        this.db.run(`
+          CREATE TRIGGER IF NOT EXISTS observations_ai AFTER INSERT ON observations BEGIN
+            INSERT INTO observations_fts(rowid, title, subtitle, narrative, text, facts, concepts)
+            VALUES (new.id, new.title, new.subtitle, new.narrative, new.text, new.facts, new.concepts);
+          END
+        `);
+
+        // DELETE trigger
+        this.db.run(`
+          CREATE TRIGGER IF NOT EXISTS observations_ad AFTER DELETE ON observations BEGIN
+            INSERT INTO observations_fts(observations_fts, rowid, title, subtitle, narrative, text, facts, concepts)
+            VALUES('delete', old.id, old.title, old.subtitle, old.narrative, old.text, old.facts, old.concepts);
+          END
+        `);
+
+        // UPDATE trigger
+        this.db.run(`
+          CREATE TRIGGER IF NOT EXISTS observations_au AFTER UPDATE ON observations BEGIN
+            INSERT INTO observations_fts(observations_fts, rowid, title, subtitle, narrative, text, facts, concepts)
+            VALUES('delete', old.id, old.title, old.subtitle, old.narrative, old.text, old.facts, old.concepts);
+            INSERT INTO observations_fts(rowid, title, subtitle, narrative, text, facts, concepts)
+            VALUES (new.id, new.title, new.subtitle, new.narrative, new.text, new.facts, new.concepts);
+          END
+        `);
+
+        // Backfill existing rows using 'rebuild' — required for external-content FTS5 to
+        // tokenize source-table content correctly. Direct INSERT only registers rowid mappings
+        // but does not build token index; 'rebuild' reads from content='observations' and
+        // tokenizes every row. Safe to call once on table creation; triggers handle future syncs.
+        this.db.run("INSERT INTO observations_fts(observations_fts) VALUES('rebuild')");
+
+        logger.debug('DB', 'Created observations_fts virtual table, sync triggers, and backfilled existing rows');
+      }
+
+    } catch (ftsError) {
+      logger.warn('DB', 'FTS5 not available, observations_fts index skipped', {}, ftsError as Error);
+    }
+
+    // Record migration regardless of FTS availability
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(28, new Date().toISOString());
+    logger.debug('DB', 'Observations FTS5 index ensured');
+  }
+
+  /**
+   * Add why, alternatives_rejected, related_observation_ids columns to observations (migration 29)
+   *
+   * WHY: A rubric-based audit (N=30) found 53% of observations carried no rationale,
+   * alternatives, or cross-references — because the capture prompt never asked for them.
+   * These three columns store "decision DNA" so future sessions can see not just WHAT
+   * changed but WHY and what was rejected.
+   *
+   * FTS5: why + alternatives_rejected are added to observations_fts so they are
+   * searchable. related_observation_ids is numeric and excluded from FTS.
+   *
+   * Cross-machine safety: checks actual column presence before ALTER TABLE, so a DB
+   * that was synced after the columns were already added won't fail.
+   */
+  private migrateToV29(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(29) as SchemaVersion | undefined;
+    if (applied) return;
+
+    // Check schema first in case cross-machine DB sync already added the columns
+    const cols = this.db.prepare('PRAGMA table_info(observations)').all() as Array<{ name: string }>;
+    const names = new Set(cols.map(c => c.name));
+    const needWhy = !names.has('why');
+    const needAlt = !names.has('alternatives_rejected');
+    const needRel = !names.has('related_observation_ids');
+
+    if (needWhy) this.db.run('ALTER TABLE observations ADD COLUMN why TEXT');
+    if (needAlt) this.db.run('ALTER TABLE observations ADD COLUMN alternatives_rejected TEXT');
+    if (needRel) this.db.run('ALTER TABLE observations ADD COLUMN related_observation_ids TEXT');
+
+    // Extend FTS5 virtual table to include why and alternatives_rejected.
+    // External-content FTS5 does not support ALTER TABLE, so we must DROP and recreate.
+    // Skip gracefully if FTS5 is unavailable (e.g., rare Bun/Windows edge case).
+    try {
+      const hasFTSTable = (this.db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='observations_fts'"
+      ).all() as { name: string }[]).length > 0;
+
+      if (hasFTSTable) {
+        // Check if why column already exists in FTS (idempotency for re-runs)
+        const ftsCols = this.db.prepare('PRAGMA table_info(observations_fts)').all() as Array<{ name: string }>;
+        const ftsHasWhy = ftsCols.some(c => c.name === 'why');
+
+        if (!ftsHasWhy) {
+          // Drop old triggers first — they reference the old FTS column set
+          this.db.run('DROP TRIGGER IF EXISTS observations_ai');
+          this.db.run('DROP TRIGGER IF EXISTS observations_ad');
+          this.db.run('DROP TRIGGER IF EXISTS observations_au');
+
+          // Drop and recreate the FTS virtual table with new columns
+          this.db.run('DROP TABLE IF EXISTS observations_fts');
+
+          this.db.run(`
+            CREATE VIRTUAL TABLE observations_fts USING fts5(
+              title, subtitle, narrative, text, facts, concepts, why, alternatives_rejected,
+              content='observations', content_rowid='id',
+              tokenize='porter unicode61'
+            )
+          `);
+
+          // Recreate triggers with the extended column set
+          this.db.run(`
+            CREATE TRIGGER observations_ai AFTER INSERT ON observations BEGIN
+              INSERT INTO observations_fts(rowid, title, subtitle, narrative, text, facts, concepts, why, alternatives_rejected)
+              VALUES (new.id, new.title, new.subtitle, new.narrative, new.text, new.facts, new.concepts, new.why, new.alternatives_rejected);
+            END
+          `);
+
+          this.db.run(`
+            CREATE TRIGGER observations_ad AFTER DELETE ON observations BEGIN
+              INSERT INTO observations_fts(observations_fts, rowid, title, subtitle, narrative, text, facts, concepts, why, alternatives_rejected)
+              VALUES('delete', old.id, old.title, old.subtitle, old.narrative, old.text, old.facts, old.concepts, old.why, old.alternatives_rejected);
+            END
+          `);
+
+          this.db.run(`
+            CREATE TRIGGER observations_au AFTER UPDATE ON observations BEGIN
+              INSERT INTO observations_fts(observations_fts, rowid, title, subtitle, narrative, text, facts, concepts, why, alternatives_rejected)
+              VALUES('delete', old.id, old.title, old.subtitle, old.narrative, old.text, old.facts, old.concepts, old.why, old.alternatives_rejected);
+              INSERT INTO observations_fts(rowid, title, subtitle, narrative, text, facts, concepts, why, alternatives_rejected)
+              VALUES (new.id, new.title, new.subtitle, new.narrative, new.text, new.facts, new.concepts, new.why, new.alternatives_rejected);
+            END
+          `);
+
+          // Backfill: rebuild index from source table content
+          this.db.run("INSERT INTO observations_fts(observations_fts) VALUES('rebuild')");
+
+          logger.debug('DB', 'Rebuilt observations_fts with why + alternatives_rejected columns');
+        }
+      }
+    } catch (ftsError) {
+      logger.warn('DB', 'FTS5 extension for V29 skipped', {}, ftsError as Error);
+    }
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(29, new Date().toISOString());
+    logger.debug('DB', 'Migration V29 complete: why/alternatives_rejected/related_observation_ids added to observations');
+  }
+
+  /**
+   * Add observation_capture_snapshots + observation_rubric_scores tables (migration 30)
+   *
+   * WHY: We cannot measure observation capture quality empirically because we
+   * never preserved the raw source (tool_input, tool_output, user_prompt,
+   * prior_assistant_message) alongside the captured fields (narrative, facts,
+   * why, etc.). Without that pairing there is no ground truth for "did the
+   * LLM hallucinate?" or "did the rubric score go up after X intent change?".
+   *
+   * `observation_capture_snapshots`: paired to each observation at write time
+   *   — stores raw inputs + captured outputs so later rubric runs can score
+   *   fidelity, intent_fit, concept_accuracy, type_correctness.
+   *
+   * `observation_rubric_scores`: stores judge output (per snapshot) so we can
+   *   track capture quality over time without re-calling the LLM.
+   *
+   * Idempotent — uses CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS.
+   */
+  private migrateToV30(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(30) as SchemaVersion | undefined;
+    if (applied) return;
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS observation_capture_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        observation_id INTEGER NOT NULL,
+        memory_session_id TEXT,
+        content_session_id TEXT,
+        prompt_number INTEGER,
+        user_prompt TEXT,
+        prior_assistant_message TEXT,
+        tool_name TEXT,
+        tool_input TEXT,
+        tool_output TEXT,
+        cwd TEXT,
+        captured_type TEXT,
+        captured_title TEXT,
+        captured_subtitle TEXT,
+        captured_narrative TEXT,
+        captured_facts TEXT,
+        captured_concepts TEXT,
+        captured_why TEXT,
+        captured_alternatives_rejected TEXT,
+        captured_related_observation_ids TEXT,
+        created_at_epoch INTEGER NOT NULL,
+        FOREIGN KEY (observation_id) REFERENCES observations(id) ON DELETE CASCADE
+      )
+    `);
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_capture_snapshot_obs ON observation_capture_snapshots(observation_id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_capture_snapshot_created ON observation_capture_snapshots(created_at_epoch DESC)');
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS observation_rubric_scores (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        observation_id INTEGER NOT NULL,
+        snapshot_id INTEGER,
+        judge_model TEXT,
+        fidelity REAL,
+        intent_fit REAL,
+        concept_accuracy REAL,
+        type_correctness REAL,
+        ceiling_flagged INTEGER,
+        judge_notes TEXT,
+        scored_at_epoch INTEGER NOT NULL,
+        FOREIGN KEY (observation_id) REFERENCES observations(id) ON DELETE CASCADE
+      )
+    `);
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_rubric_obs ON observation_rubric_scores(observation_id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_rubric_scored ON observation_rubric_scores(scored_at_epoch DESC)');
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(30, new Date().toISOString());
+    logger.debug('DB', 'Migration V30 complete: observation_capture_snapshots + observation_rubric_scores');
+  }
+
+  /**
+   * Add context-origin tracking to observation_tool_origins (migration 31)
+   *
+   * WHY: Observations generated outside the tool-call path (init prompt,
+   * continuation prompt, summary prompt, user-prompt-only turns) had no row
+   * in observation_tool_origins because the existing insert path keyed off
+   * pending_message_id, which is only set on tool_use messages. Those
+   * observations rendered in the trace modal as permanent orphans ("No origin
+   * link found"). Example: obs #11779 "Plano formal solicitado para 1,2,3".
+   *
+   * Fix: add two nullable columns to the existing table so context-based
+   * origins can coexist with tool-based origins:
+   *   - context_type TEXT      — 'user_prompt' | 'init_prompt' |
+   *                              'continuation_prompt' | 'summary_prompt' |
+   *                              NULL (tool-based)
+   *   - context_ref_json TEXT  — JSON payload referencing the source
+   *                              (e.g. {"user_prompt_id":123} or
+   *                              {"session_db_id":45,"prompt_number":3})
+   *
+   * The old unique index idx_observation_tool_origins_observation_pending
+   * used COALESCE(pending_message_id, -1), which would collide all
+   * context-based origins for the same observation on the sentinel -1. Drop
+   * it and recreate a composite index that keys on
+   * (observation_id, COALESCE(pending_message_id, -1), COALESCE(context_type, ''))
+   * so tool-based and context-based origins can coexist per observation.
+   *
+   * Idempotent: checks existing columns via PRAGMA before ALTER.
+   */
+  private migrateToV31(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(31) as SchemaVersion | undefined;
+
+    const cols = this.db.prepare('PRAGMA table_info(observation_tool_origins)').all() as TableColumnInfo[];
+    // Fresh DB: table doesn't exist yet. It'll be created later by ensureOriginsTables
+    // with the new schema already including context_type + context_ref_json. Mark
+    // V31 as applied so we don't try to ALTER a non-existent table.
+    if (cols.length === 0) {
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(31, new Date().toISOString());
+      return;
+    }
+    const names = new Set(cols.map(c => c.name));
+    const needContextType = !names.has('context_type');
+    const needContextRef = !names.has('context_ref_json');
+
+    if (applied && !needContextType && !needContextRef) return;
+
+    if (needContextType) {
+      this.db.run('ALTER TABLE observation_tool_origins ADD COLUMN context_type TEXT');
+    }
+    if (needContextRef) {
+      this.db.run('ALTER TABLE observation_tool_origins ADD COLUMN context_ref_json TEXT');
+    }
+
+    // Relax the unique index so multiple context origins can coexist with a
+    // tool-based origin on the same observation. The old index collapsed all
+    // NULL pending_message_id rows to sentinel -1 and would prevent the
+    // insertion of >1 context origin per observation.
+    this.db.run('DROP INDEX IF EXISTS idx_observation_tool_origins_observation_pending');
+    this.db.run(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_observation_tool_origins_observation_pending_context ' +
+      'ON observation_tool_origins(observation_id, COALESCE(pending_message_id, -1), COALESCE(context_type, \'\'))'
+    );
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_observation_tool_origins_context_type ON observation_tool_origins(context_type)');
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(31, new Date().toISOString());
+    logger.debug('DB', 'Migration V31 complete: context_type + context_ref_json on observation_tool_origins');
+  }
+
+  /**
+   * Create mcp_invocations table for MCP tool call logging (migration 32)
+   *
+   * Logs every MCP tool invocation (name, args summary, result status, duration)
+   * for aggregation in the Memory Assist viewer.
+   *
+   * Idempotent: uses CREATE TABLE IF NOT EXISTS and checks table existence
+   * before recording the version row.
+   */
+  private migrateToV32(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(32) as SchemaVersion | undefined;
+    const tableCheck = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='mcp_invocations'").get() as { name: string } | undefined;
+
+    if (applied && tableCheck) return;
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS mcp_invocations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tool_name TEXT NOT NULL,
+        args_summary TEXT,
+        result_status TEXT NOT NULL,
+        error_message TEXT,
+        duration_ms INTEGER,
+        invoked_at_epoch INTEGER NOT NULL
+      )
+    `);
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_mcp_invocations_tool_time ON mcp_invocations(tool_name, invoked_at_epoch DESC)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_mcp_invocations_time ON mcp_invocations(invoked_at_epoch DESC)');
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(32, new Date().toISOString());
+    logger.debug('DB', 'Migration V32 complete: mcp_invocations table');
   }
 }

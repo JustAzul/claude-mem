@@ -16,6 +16,8 @@ import { ChromaSync } from '../../sync/ChromaSync.js';
 import { ChromaSearchStrategy } from './strategies/ChromaSearchStrategy.js';
 import { SQLiteSearchStrategy } from './strategies/SQLiteSearchStrategy.js';
 import { HybridSearchStrategy } from './strategies/HybridSearchStrategy.js';
+import { FTSSearchStrategy } from './strategies/FTSSearchStrategy.js';
+import { MultiSignalSearchStrategy } from './strategies/MultiSignalSearchStrategy.js';
 
 import { ResultFormatter } from './ResultFormatter.js';
 import { TimelineBuilder } from './TimelineBuilder.js';
@@ -45,6 +47,8 @@ export class SearchOrchestrator {
   private chromaStrategy: ChromaSearchStrategy | null = null;
   private sqliteStrategy: SQLiteSearchStrategy;
   private hybridStrategy: HybridSearchStrategy | null = null;
+  private ftsStrategy: FTSSearchStrategy | null = null;
+  private multiSignalStrategy: MultiSignalSearchStrategy | null = null;
   private resultFormatter: ResultFormatter;
   private timelineBuilder: TimelineBuilder;
 
@@ -59,6 +63,15 @@ export class SearchOrchestrator {
     if (chromaSync) {
       this.chromaStrategy = new ChromaSearchStrategy(chromaSync, sessionStore);
       this.hybridStrategy = new HybridSearchStrategy(chromaSync, sessionStore, sessionSearch);
+    }
+
+    // FTS strategy is always instantiated when sessionStore + sessionSearch are present.
+    // The strategy itself gates execution on FTS5 table availability (checkFTSAvailable).
+    this.ftsStrategy = new FTSSearchStrategy(sessionStore, sessionSearch);
+
+    // MultiSignal requires both Chroma and FTS
+    if (this.chromaStrategy !== null && this.ftsStrategy !== null) {
+      this.multiSignalStrategy = new MultiSignalSearchStrategy(this.chromaStrategy, this.ftsStrategy);
     }
 
     this.resultFormatter = new ResultFormatter();
@@ -77,27 +90,63 @@ export class SearchOrchestrator {
 
   /**
    * Execute search with fallback logic
+   *
+   * Decision tree:
+   *   PATH 1:  no query                             → SQLite (filter-only)
+   *   PATH 2a: query + strategyHint=multi_signal    → MultiSignalSearchStrategy (if available, else graceful degrade)
+   *   PATH 2b: query + strategyHint=fts             → FTSSearchStrategy (forced)
+   *   PATH 2c: query + multiSignalStrategy avail    → MultiSignalSearchStrategy (auto)
+   *   PATH 2d: query + Chroma only                  → ChromaSearchStrategy
+   *   PATH 2e: query + FTS only                     → FTSSearchStrategy (Chroma offline)
+   *   PATH 3:  all strategies failed/unavail        → SQLite fallback
    */
   private async executeWithFallback(
     options: NormalizedParams
   ): Promise<StrategySearchResult> {
-    // PATH 1: FILTER-ONLY (no query text) - Use SQLite
+    // PATH 1: FILTER-ONLY (no query text) — use SQLite regardless of hint
     if (!options.query) {
       logger.debug('SEARCH', 'Orchestrator: Filter-only query, using SQLite', {});
       return await this.sqliteStrategy.search(options);
     }
 
-    // PATH 2: CHROMA SEMANTIC SEARCH (query text + Chroma available)
-    if (this.chromaStrategy) {
-      logger.debug('SEARCH', 'Orchestrator: Using Chroma semantic search', {});
+    const hint = options.strategyHint;
+
+    // PATH 2a: Explicit multi_signal hint
+    if (hint === 'multi_signal') {
+      if (this.multiSignalStrategy !== null && this.multiSignalStrategy.canHandle(options)) {
+        logger.debug('SEARCH', 'Orchestrator: strategyHint=multi_signal, using MultiSignalSearchStrategy', {});
+        return await this.multiSignalStrategy.search(options);
+      }
+      // Graceful degrade: multi_signal unavailable, fall through to auto-routing
+      logger.debug('SEARCH', 'Orchestrator: strategyHint=multi_signal but strategy unavailable, degrading to auto', {});
+    }
+
+    // PATH 2b: Explicit fts hint
+    if (hint === 'fts') {
+      if (this.ftsStrategy !== null && this.ftsStrategy.canHandle(options)) {
+        logger.debug('SEARCH', 'Orchestrator: strategyHint=fts, using FTSSearchStrategy', {});
+        return await this.ftsStrategy.search(options);
+      }
+      // FTS unavailable, fall through to auto-routing
+      logger.debug('SEARCH', 'Orchestrator: strategyHint=fts but FTS not available, degrading to auto', {});
+    }
+
+    // PATH 2c: Auto-routing — multi_signal (Chroma + FTS both available)
+    if (this.multiSignalStrategy !== null && this.multiSignalStrategy.canHandle(options)) {
+      logger.debug('SEARCH', 'Orchestrator: Using MultiSignalSearchStrategy (auto)', {});
+      return await this.multiSignalStrategy.search(options);
+    }
+
+    // PATH 2d: Auto-routing — Chroma only (FTS unavailable or uninitialized)
+    if (this.chromaStrategy !== null && this.chromaStrategy.canHandle(options)) {
+      logger.debug('SEARCH', 'Orchestrator: Using Chroma semantic search (FTS unavailable)', {});
       const result = await this.chromaStrategy.search(options);
 
-      // If Chroma succeeded (even with 0 results), return
       if (result.usedChroma) {
         return result;
       }
 
-      // Chroma failed - fall back to SQLite for filter-only
+      // Chroma returned but marked failure — fall to SQLite
       logger.debug('SEARCH', 'Orchestrator: Chroma failed, falling back to SQLite', {});
       const fallbackResult = await this.sqliteStrategy.search({
         ...options,
@@ -110,12 +159,22 @@ export class SearchOrchestrator {
       };
     }
 
-    // PATH 3: No Chroma available
-    logger.debug('SEARCH', 'Orchestrator: Chroma not available', {});
+    // PATH 2e: Auto-routing — FTS only (Chroma offline)
+    if (this.ftsStrategy !== null && this.ftsStrategy.canHandle(options)) {
+      logger.debug('SEARCH', 'Orchestrator: Using FTSSearchStrategy (Chroma offline)', {});
+      return await this.ftsStrategy.search(options);
+    }
+
+    // PATH 3: All strategies failed/unavailable — SQLite fallback (no query)
+    logger.debug('SEARCH', 'Orchestrator: No strategy available, falling back to SQLite (no query)', {});
+    const fallbackResult = await this.sqliteStrategy.search({
+      ...options,
+      query: undefined
+    });
+
     return {
-      results: { observations: [], sessions: [], prompts: [] },
-      usedChroma: false,
-      fellBack: false,
+      ...fallbackResult,
+      fellBack: true,
       strategy: 'sqlite'
     };
   }

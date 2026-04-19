@@ -32,23 +32,31 @@ export class SessionCompletionHandler {
     // Delete from session manager (aborts SDK agent via SIGTERM)
     await this.sessionManager.deleteSession(sessionDbId);
 
-    // Drain orphaned pending messages left by SIGTERM.
-    // When deleteSession() aborts the generator, pending messages in the queue
-    // are never processed. Without drain, they stay in 'pending' status forever
-    // since no future generator will pick them up for a completed session.
-    // Note: this is best-effort — if a generator outlives the 30s SIGTERM timeout
-    // (SessionManager.deleteSession), it may enqueue messages after this drain.
-    // In practice this race is rare (zero orphans over 23 days, 3400+ observations).
+    // Requeue in-flight pending messages rather than failing them.
+    // When deleteSession() aborts the generator, messages may be left as
+    // 'pending' (never picked up) or 'processing' (generator aborted mid-flight).
+    // These callers include worker-restart paths where the Claude Code parent
+    // session is still active — a silent `markAllSessionMessagesAbandoned` here
+    // drops work that the next generator could have completed.
+    //
+    // Requeue semantics:
+    //   - 'pending'    → stays 'pending' (no-op)
+    //   - 'processing' → reset to 'pending' with started_processing_at_epoch = NULL
+    //   - 'processed'/'failed' → untouched (terminal states)
+    //
+    // True abandonment (stale session cleanup, no-fallback drain, wall-clock
+    // guard, idle/unrecoverable termination, user cancel) still uses
+    // markAllSessionMessagesAbandoned at their own call sites.
     try {
       const pendingStore = this.sessionManager.getPendingMessageStore();
-      const drainedCount = pendingStore.markAllSessionMessagesAbandoned(sessionDbId);
-      if (drainedCount > 0) {
-        logger.warn('SESSION', `Drained ${drainedCount} orphaned pending messages on session completion`, {
-          sessionId: sessionDbId, drainedCount
+      const requeuedCount = pendingStore.requeueInFlightForSession(sessionDbId);
+      if (requeuedCount > 0) {
+        logger.warn('SESSION', `Requeued ${requeuedCount} in-flight pending messages on session completion`, {
+          sessionId: sessionDbId, requeuedCount
         });
       }
     } catch (e) {
-      logger.debug('SESSION', 'Failed to drain pending queue on session completion', {
+      logger.debug('SESSION', 'Failed to requeue pending messages on session completion', {
         sessionId: sessionDbId, error: e instanceof Error ? e.message : String(e)
       });
     }

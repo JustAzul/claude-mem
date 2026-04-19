@@ -26,7 +26,14 @@ function runWorkerStart(): { stdout: string; exitCode: number } {
     encoding: 'utf-8',
     timeout: 60000
   });
-  return { stdout: result.stdout?.trim() || '', exitCode: result.status || 0 };
+  const stdoutLines = (result.stdout || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return {
+    stdout: stdoutLines[stdoutLines.length - 1] || '',
+    exitCode: result.status || 0,
+  };
 }
 
 describe('worker-json-status', () => {
@@ -315,7 +322,11 @@ describe('worker-json-status', () => {
         timeout: 60000
       });
 
-      const stdout = result.stdout?.trim() || '';
+      const stdout = (result.stdout || '')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .pop() || '';
       const stderr = result.stderr?.trim() || '';
 
       // stdout should contain valid JSON

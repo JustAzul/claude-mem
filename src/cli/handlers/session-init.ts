@@ -13,6 +13,7 @@ import { isProjectExcluded } from '../../utils/project-filter.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
 import { USER_SETTINGS_PATH } from '../../shared/paths.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
+import { reportMemoryAssist } from './memory-assist-report.js';
 
 export const sessionInitHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
@@ -31,19 +32,27 @@ export const sessionInitHandler: EventHandler = {
       return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
     }
 
+    const project = getProjectContext(cwd).primary;
+    const platformSource = normalizePlatformSource(input.platform);
+
     // Check if project is excluded from tracking
     const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
     if (cwd && isProjectExcluded(cwd, settings.CLAUDE_MEM_EXCLUDED_PROJECTS)) {
       logger.info('HOOK', 'Project excluded from tracking', { cwd });
+      await reportMemoryAssist({
+        source: 'semantic_prompt',
+        status: 'skipped',
+        reason: 'project_excluded',
+        project,
+        contentSessionId: sessionId,
+        platformSource,
+      });
       return { continue: true, suppressOutput: true };
     }
 
     // Handle image-only prompts (where text prompt is empty/undefined)
     // Use placeholder so sessions still get created and tracked for memory
     const prompt = (!rawPrompt || !rawPrompt.trim()) ? '[media prompt]' : rawPrompt;
-
-    const project = getProjectContext(cwd).primary;
-    const platformSource = normalizePlatformSource(input.platform);
 
     logger.debug('HOOK', 'session-init: Calling /api/sessions/init', { contentSessionId: sessionId, project });
 
@@ -125,10 +134,52 @@ export const sessionInitHandler: EventHandler = {
 
     // Semantic context injection: query Chroma for relevant past observations
     // and inject as additionalContext so Claude receives relevant memory each prompt.
-    // Controlled by CLAUDE_MEM_SEMANTIC_INJECT setting (default: true).
+    // Controlled by CLAUDE_MEM_SEMANTIC_INJECT setting (default: false).
     const semanticInject =
       String(settings.CLAUDE_MEM_SEMANTIC_INJECT).toLowerCase() === 'true';
     let additionalContext = '';
+    const semanticThreshold = parseFloat(String(settings.CLAUDE_MEM_SEMANTIC_INJECT_THRESHOLD || '0.35'));
+
+    if (!semanticInject) {
+      await reportMemoryAssist({
+        source: 'semantic_prompt',
+        status: 'disabled',
+        reason: 'semantic_inject_disabled',
+        project,
+        promptNumber,
+        sessionDbId,
+        contentSessionId: sessionId,
+        platformSource,
+        promptLength: prompt.length,
+        threshold: Number.isFinite(semanticThreshold) ? semanticThreshold : undefined,
+      });
+    } else if (prompt === '[media prompt]') {
+      await reportMemoryAssist({
+        source: 'semantic_prompt',
+        status: 'skipped',
+        reason: 'media_prompt',
+        project,
+        promptNumber,
+        sessionDbId,
+        contentSessionId: sessionId,
+        platformSource,
+        promptLength: 0,
+        threshold: Number.isFinite(semanticThreshold) ? semanticThreshold : undefined,
+      });
+    } else if (prompt.length < 20) {
+      await reportMemoryAssist({
+        source: 'semantic_prompt',
+        status: 'skipped',
+        reason: 'query_too_short',
+        project,
+        promptNumber,
+        sessionDbId,
+        contentSessionId: sessionId,
+        platformSource,
+        promptLength: prompt.length,
+        threshold: Number.isFinite(semanticThreshold) ? semanticThreshold : undefined,
+      });
+    }
 
     if (semanticInject && prompt && prompt.length >= 20 && prompt !== '[media prompt]') {
       try {
@@ -136,7 +187,16 @@ export const sessionInitHandler: EventHandler = {
         const semanticRes = await workerHttpRequest('/api/context/semantic', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ q: prompt, project, limit })
+          body: JSON.stringify({
+            q: prompt,
+            project,
+            limit,
+            threshold: Number.isFinite(semanticThreshold) ? semanticThreshold : undefined,
+            promptNumber,
+            sessionDbId,
+            contentSessionId: sessionId,
+            platformSource,
+          })
         });
         if (semanticRes.ok) {
           const data = await semanticRes.json() as { context: string; count: number };
@@ -151,6 +211,19 @@ export const sessionInitHandler: EventHandler = {
         // Graceful degradation — semantic injection is optional
         logger.debug('HOOK', 'Semantic injection unavailable', {
           error: e instanceof Error ? e.message : String(e)
+        });
+        await reportMemoryAssist({
+          source: 'semantic_prompt',
+          status: 'error',
+          reason: 'semantic_request_failed',
+          message: e instanceof Error ? e.message : String(e),
+          project,
+          promptNumber,
+          sessionDbId,
+          contentSessionId: sessionId,
+          platformSource,
+          promptLength: prompt.length,
+          threshold: Number.isFinite(semanticThreshold) ? semanticThreshold : undefined,
         });
       }
     }

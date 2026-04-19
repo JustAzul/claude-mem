@@ -47,9 +47,9 @@ describe('Install Non-TTY Support', () => {
       expect(installSource).toContain('await p.tasks(tasks)');
     });
 
-    it('has non-interactive fallback using console.log', () => {
+    it('has non-interactive fallback using stdout writes', () => {
       // In non-TTY mode, tasks iterate and log output directly
-      expect(installSource).toContain('console.log(`  ${msg}`)');
+      expect(installSource).toContain('writeStdout(`  ${msg}`)');
     });
 
     it('branches on isInteractive', () => {
@@ -58,25 +58,24 @@ describe('Install Non-TTY Support', () => {
   });
 
   describe('log wrapper', () => {
-    it('defines log.info that falls back to console.log', () => {
+    it('defines log.info that falls back to stdout writes', () => {
       expect(installSource).toContain('info: (msg: string) =>');
-      // Should have console.log fallback
-      expect(installSource).toMatch(/info:.*console\.log/);
+      expect(installSource).toMatch(/info:.*writeStdout/);
     });
 
-    it('defines log.success that falls back to console.log', () => {
+    it('defines log.success that falls back to stdout writes', () => {
       expect(installSource).toContain('success: (msg: string) =>');
-      expect(installSource).toMatch(/success:.*console\.log/);
+      expect(installSource).toMatch(/success:.*writeStdout/);
     });
 
-    it('defines log.warn that falls back to console.warn', () => {
+    it('defines log.warn that falls back to stderr writes', () => {
       expect(installSource).toContain('warn: (msg: string) =>');
-      expect(installSource).toMatch(/warn:.*console\.warn/);
+      expect(installSource).toMatch(/warn:.*writeStderr/);
     });
 
-    it('defines log.error that falls back to console.error', () => {
+    it('defines log.error that falls back to stderr writes', () => {
       expect(installSource).toContain('error: (msg: string) =>');
-      expect(installSource).toMatch(/error:.*console\.error/);
+      expect(installSource).toMatch(/error:.*writeStderr/);
     });
   });
 
@@ -86,12 +85,12 @@ describe('Install Non-TTY Support', () => {
       expect(installSource).toContain("selectedIDEs = ['claude-code']");
     });
 
-    it('uses console.log for intro in non-interactive mode', () => {
-      expect(installSource).toContain("console.log('claude-mem install')");
+    it('uses stdout writes for intro in non-interactive mode', () => {
+      expect(installSource).toContain("writeStdout('claude-mem install')");
     });
 
-    it('uses console.log for note/summary in non-interactive mode', () => {
-      expect(installSource).toContain("console.log(`\\n  ${installStatus}`)");
+    it('uses stdout writes for note/summary in non-interactive mode', () => {
+      expect(installSource).toContain("writeStdout(`\\n  ${installStatus}`)");
     });
   });
 

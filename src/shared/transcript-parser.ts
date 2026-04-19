@@ -129,8 +129,14 @@ function extractLastMessageFromJsonl(
           text = text.replace(/\n{3,}/g, '\n\n').trim();
         }
 
-        // Return text even if empty - caller decides if that's an error
-        return text;
+        // Recent assistant turns are often pure tool_use / thinking blocks with
+        // no text — keep scanning backwards until we find one with actual prose.
+        // Without this, PostToolUse fires right after a tool_use turn and the
+        // caller gets "" even though the user-facing assistant message is 1-2
+        // lines earlier in the transcript.
+        if (text) {
+          return text;
+        }
       }
     }
   }

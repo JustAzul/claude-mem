@@ -20,6 +20,36 @@ import type { WorkerService } from '../../../worker-service.js';
 import { BaseRouteHandler } from '../BaseRouteHandler.js';
 import { normalizePlatformSource } from '../../../../shared/platform-source.js';
 import { getObservationsByFilePath } from '../../../sqlite/observations/get.js';
+import { calculateTokenEconomics } from '../../../../services/context/TokenCalculator.js';
+import type { Observation as ContextObservation } from '../../../../services/context/types.js';
+
+// Inline secret-redaction — mirrors src/sdk/prompts.ts SECRET_PATTERNS + redactSecrets.
+// TODO: consolidate into a shared utility when prompts.ts is refactored.
+const _SECRET_PATTERNS: Array<RegExp> = [
+  /sk-ant-[A-Za-z0-9_-]{20,}/g,
+  /sk-(?:proj-)?[A-Za-z0-9_-]{20,}/g,
+  /gh[pousr]_[A-Za-z0-9]{36,}/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+  /\bBearer\s+[A-Za-z0-9._-]{20,}/gi,
+  /\b(?:api[_-]?key|secret|password|passwd|access[_-]?token|refresh[_-]?token)\s*[:=]\s*["']?([^\s"'&;]{6,})/gi,
+];
+
+function _redactSecrets(text: string): string {
+  let out = text;
+  for (const re of _SECRET_PATTERNS) {
+    out = out.replace(re, (match) => {
+      const eqIdx = match.search(/[:=]/);
+      if (eqIdx > -1 && /\b(?:api[_-]?key|secret|password|passwd|access[_-]?token|refresh[_-]?token)/i.test(match.slice(0, eqIdx))) {
+        return match.slice(0, eqIdx + 1) + '[REDACTED]';
+      }
+      return '[REDACTED]';
+    });
+  }
+  return out;
+}
+
+type TokenObservation = Pick<ContextObservation, 'title' | 'subtitle' | 'narrative' | 'facts' | 'discovery_tokens'>;
 
 export class DataRoutes extends BaseRouteHandler {
   constructor(
@@ -41,6 +71,8 @@ export class DataRoutes extends BaseRouteHandler {
 
     // Fetch by ID endpoints
     app.get('/api/observation/:id', this.handleGetObservationById.bind(this));
+    app.get('/api/observations/:id/origin', this.handleGetObservationOrigin.bind(this));
+    app.get('/api/observations/:id/trace', this.handleGetObservationTrace.bind(this));
     app.get('/api/observations/by-file', this.handleGetObservationsByFile.bind(this));
     app.post('/api/observations/batch', this.handleGetObservationsByIds.bind(this));
     app.get('/api/session/:id', this.handleGetSessionById.bind(this));
@@ -102,13 +134,116 @@ export class DataRoutes extends BaseRouteHandler {
 
     const store = this.dbManager.getSessionStore();
     const observation = store.getObservationById(id);
+    const origin = store.getObservationOrigin(id);
 
     if (!observation) {
       this.notFound(res, `Observation #${id} not found`);
       return;
     }
 
-    res.json(observation);
+    res.json({
+      ...observation,
+      origin,
+    });
+  });
+
+  /**
+   * Get observation origin by observation ID
+   * GET /api/observations/:id/origin
+   */
+  private handleGetObservationOrigin = this.wrapHandler((req: Request, res: Response): void => {
+    const id = this.parseIntParam(req, res, 'id');
+    if (id === null) return;
+
+    const store = this.dbManager.getSessionStore();
+    const origin = store.getObservationOrigin(id);
+
+    if (!origin) {
+      this.notFound(res, `Origin for observation #${id} not found`);
+      return;
+    }
+
+    res.json(origin);
+  });
+
+  /**
+   * Get full trace for an observation — joins all context for the debug view.
+   * GET /api/observations/:id/trace
+   */
+  private handleGetObservationTrace = this.wrapHandler((req: Request, res: Response): void => {
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      this.badRequest(res, 'id must be a positive integer');
+      return;
+    }
+    const db = this.dbManager.getSessionStore().db;
+
+    // Section 1: core observation
+    const observation = db.prepare('SELECT * FROM observations WHERE id = ?').get(id);
+    if (!observation) {
+      res.status(404).json({ error: `observation ${id} not found` });
+      return;
+    }
+
+    // Section 2: source tool call (via observation_tool_origins → pending_messages)
+    let source = null;
+    const origin = db.prepare('SELECT * FROM observation_tool_origins WHERE observation_id = ? ORDER BY created_at_epoch DESC LIMIT 1').get(id);
+    if (origin) {
+      const pendingMsg = db.prepare('SELECT * FROM pending_messages WHERE id = ?').get((origin as any).pending_message_id);
+      source = { origin, pendingMessage: pendingMsg ?? null };
+    }
+
+    // Section 3: turn context — resolve content_session_id via sdk_sessions
+    let turn = null;
+    const obsAny = observation as any;
+    if (obsAny.memory_session_id && obsAny.prompt_number != null) {
+      const sdkSession = db.prepare('SELECT id, content_session_id FROM sdk_sessions WHERE memory_session_id = ? ORDER BY id DESC LIMIT 1').get(obsAny.memory_session_id) as any;
+      const contentSessionId = sdkSession?.content_session_id ?? null;
+      let userPrompt = null;
+      if (contentSessionId) {
+        userPrompt = db.prepare('SELECT prompt_text, created_at_epoch FROM user_prompts WHERE content_session_id = ? AND prompt_number = ? LIMIT 1').get(contentSessionId, obsAny.prompt_number);
+      }
+      // Siblings: other obs with same memory_session_id + prompt_number
+      const siblings = db.prepare('SELECT id, type, title, created_at_epoch FROM observations WHERE memory_session_id = ? AND prompt_number = ? AND id != ? ORDER BY created_at_epoch ASC').all(obsAny.memory_session_id, obsAny.prompt_number, id);
+
+      // priorAssistantMessage — from capture snapshot (V30), truncated to 500 chars end-preserved
+      const store = this.dbManager.getSessionStore();
+      const snapshotCtx = store.getObservationRetrievalContext([id]);
+      let priorAssistantMessage: string | null = null;
+      const snap = snapshotCtx.get(id);
+      if (snap?.prior_assistant_message) {
+        const raw = _redactSecrets(snap.prior_assistant_message);
+        priorAssistantMessage = raw.length > 500 ? raw.slice(raw.length - 500) : raw;
+      }
+
+      turn = { contentSessionId, userPrompt: userPrompt ?? null, priorAssistantMessage, siblings };
+    }
+
+    // Section 4: memory-assist refs
+    // a) decisions where this obs was injected (trace_items_json mentions the ID)
+    const injectedIn = db.prepare(`
+      SELECT id, source, status, system_verdict, system_confidence, file_path, prompt_number, created_at_epoch
+      FROM memory_assist_decisions
+      WHERE trace_items_json LIKE ?
+      ORDER BY created_at_epoch DESC
+      LIMIT 20
+    `).all(`%"observationId":${id}%`);
+
+    // b) outcome_signals where this obs was generated by a tool action
+    const generatedBy = db.prepare(`
+      SELECT id, decision_id, signal_type, action, tool_name, file_path, created_at_epoch
+      FROM memory_assist_outcome_signals
+      WHERE EXISTS (
+        SELECT 1 FROM json_each(generated_observation_ids_json)
+        WHERE CAST(json_each.value AS INTEGER) = ?
+      )
+      ORDER BY created_at_epoch DESC
+      LIMIT 20
+    `).all(id);
+
+    const memoryAssist = { injectedIn, generatedBy };
+
+    res.json({ observation, source, turn, memoryAssist });
   });
 
   /**
@@ -165,7 +300,53 @@ export class DataRoutes extends BaseRouteHandler {
     const store = this.dbManager.getSessionStore();
     const observations = store.getObservationsByIds(ids, { orderBy, limit, project });
 
-    res.json(observations);
+    if (observations.length === 0) {
+      res.json(observations);
+      return;
+    }
+
+    // Enrich each observation with retrieval-time context from capture snapshots (V30)
+    const obsIds = observations.map((o: any) => o.id as number);
+    const ctxMap = store.getObservationRetrievalContext(obsIds);
+    const db = store.db;
+
+    const enriched = observations.map((obs: any) => {
+      const ctx = ctxMap.get(obs.id) ?? null;
+      if (!ctx) {
+        return { ...obs, retrieved_with_context: null };
+      }
+
+      const rawUserPrompt = ctx.user_prompt ?? null;
+      const rawPrior = ctx.prior_assistant_message ?? null;
+
+      const user_prompt = rawUserPrompt
+        ? (() => { const r = _redactSecrets(rawUserPrompt); return r.length > 200 ? r.slice(0, 200) : r; })()
+        : null;
+
+      const prior_assistant_snippet = rawPrior
+        ? (() => { const r = _redactSecrets(rawPrior); return r.length > 150 ? r.slice(r.length - 150) : r; })()
+        : null;
+
+      // Sibling titles: same content_session_id + prompt_number, excluding self, max 5
+      let sibling_obs_titles: string[] = [];
+      if (ctx.content_session_id != null && ctx.prompt_number != null) {
+        const sibRows = db.prepare(`
+          SELECT o.title FROM observations o
+          JOIN observation_capture_snapshots s ON s.observation_id = o.id
+          WHERE s.content_session_id = ? AND s.prompt_number = ? AND o.id != ?
+          ORDER BY s.created_at_epoch ASC
+          LIMIT 5
+        `).all(ctx.content_session_id, ctx.prompt_number, obs.id) as Array<{ title: string | null }>;
+        sibling_obs_titles = sibRows.map(r => r.title ?? '').filter(Boolean);
+      }
+
+      return {
+        ...obs,
+        retrieved_with_context: { user_prompt, prior_assistant_snippet, sibling_obs_titles },
+      };
+    });
+
+    res.json(enriched);
   });
 
   /**
@@ -245,6 +426,16 @@ export class DataRoutes extends BaseRouteHandler {
     const totalObservations = db.prepare('SELECT COUNT(*) as count FROM observations').get() as { count: number };
     const totalSessions = db.prepare('SELECT COUNT(*) as count FROM sdk_sessions').get() as { count: number };
     const totalSummaries = db.prepare('SELECT COUNT(*) as count FROM session_summaries').get() as { count: number };
+    const tokenObservationRows = db.prepare(`
+      SELECT
+        title,
+        subtitle,
+        narrative,
+        facts,
+        discovery_tokens
+      FROM observations
+    `).all() as TokenObservation[];
+    const tokenEconomics = calculateTokenEconomics(tokenObservationRows);
 
     // Get database file size and path
     const dbPath = path.join(homedir(), '.claude-mem', 'claude-mem.db');
@@ -272,7 +463,8 @@ export class DataRoutes extends BaseRouteHandler {
         observations: totalObservations.count,
         sessions: totalSessions.count,
         summaries: totalSummaries.count
-      }
+      },
+      tokenEconomics
     });
   });
 

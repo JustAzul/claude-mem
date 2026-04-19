@@ -38,6 +38,14 @@ export interface ModePrompts {
   xml_concept_placeholder: string;         // e.g., "[knowledge-type-category]"
   xml_file_placeholder: string;            // e.g., "[path/to/file]"
 
+  // Decision DNA XML placeholders and guidance (migration 29)
+  xml_why_placeholder: string;             // e.g., "[**why**: 1-3 sentences on rationale...]"
+  xml_alternatives_placeholder: string;    // e.g., "[**alternatives_rejected**: what was considered-and-rejected...]"
+  xml_related_placeholder: string;         // e.g., "[integer observation id]"
+  why_guidance: string;                    // Inline comment explaining the <why> field to the LLM
+  alternatives_guidance: string;           // Inline comment explaining <alternatives_rejected> to the LLM
+  related_guidance: string;                // Inline comment explaining <related> block to the LLM
+
   // Summary XML placeholders
   xml_summary_request_placeholder: string;      // e.g., "[Short title capturing the user's request AND...]"
   xml_summary_investigated_placeholder: string; // e.g., "[What has been explored so far? What was examined?]"

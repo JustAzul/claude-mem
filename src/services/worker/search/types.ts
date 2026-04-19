@@ -84,7 +84,7 @@ export interface ExtendedSearchOptions extends SearchOptions {
 /**
  * Search strategy selection hint
  */
-export type SearchStrategyHint = 'chroma' | 'sqlite' | 'hybrid' | 'auto';
+export type SearchStrategyHint = 'chroma' | 'sqlite' | 'hybrid' | 'fts' | 'multi_signal' | 'auto';
 
 /**
  * Options passed to search strategies
@@ -103,10 +103,20 @@ export interface StrategySearchResult {
   results: SearchResults;
   /** Whether Chroma was used successfully */
   usedChroma: boolean;
+  /** Whether FTS5 BM25 search was used successfully */
+  usedFTS?: boolean;
   /** Whether fallback was triggered */
   fellBack: boolean;
   /** Strategy that produced the results */
   strategy: SearchStrategyHint;
+}
+
+/**
+ * Extends the base ObservationSearchResult with a multi-signal combined score.
+ * Only populated when the result was produced by MultiSignalSearchStrategy.
+ */
+export interface MultiSignalObservationResult extends ObservationSearchResult {
+  combined_score: number;
 }
 
 /**

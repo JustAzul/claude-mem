@@ -14,8 +14,93 @@ import {
 } from '../../types/database.js';
 import type { PendingMessageStore } from './PendingMessageStore.js';
 import { computeObservationContentHash, findDuplicateObservation } from './observations/store.js';
+import {
+  capturedFromObservation,
+  emptyCaptureSnapshotSource,
+  insertCaptureSnapshot,
+  type CaptureSnapshotSource,
+} from './observations/capture-snapshot.js';
 import { parseFileList } from './observations/files.js';
+import {
+  getObservationFeedbackStats,
+  recordObservationFeedback,
+  type ObservationFeedbackSignal,
+  type ObservationFeedbackStats,
+} from './observations/feedback.js';
 import { DEFAULT_PLATFORM_SOURCE, normalizePlatformSource, sortPlatformSources } from '../../shared/platform-source.js';
+import { estimateTimelineTokensFromTraceItems } from '../../shared/timeline-formatting.js';
+import type {
+  MemoryAssistCalibrationSnapshot,
+  MemoryAssistDashboard,
+  MemoryAssistDecisionRecord,
+  MemoryAssistFeedbackLabel,
+  MemoryAssistOutcomeSignal,
+  MemoryAssistReport,
+} from '../../shared/memory-assist.js';
+import {
+  attachMemoryAssistDecisionFeedback,
+  ensureMemoryAssistDecisionsTable,
+  getDecisionRowsForIds,
+  getMemoryAssistDecisionsForPrompt,
+  getRecentMemoryAssistDecisions,
+  recordMemoryAssistDecision,
+  updateMemoryAssistDecisionVerdict,
+} from './memory-assist/decisions.js';
+import {
+  attachGeneratedObservationsToOutcomeSignal,
+  ensureMemoryAssistOutcomeSignalsTable,
+  getOutcomeSignalsForDecisionIds,
+  recordMemoryAssistOutcomeSignal,
+} from './memory-assist/outcomes.js';
+import {
+  attachObservationOriginsToPendingMessage,
+  backfillRecentObservationOrigins,
+  ensureObservationToolOriginsTable,
+  getObservationOrigin,
+  getObservationOrigins,
+  insertContextOrigin,
+  type ObservationContextType,
+  type ObservationToolOriginRecord,
+} from './memory-assist/origins.js';
+import {
+  ensureMemoryAssistCalibrationTable,
+  getMemoryAssistCalibrationSnapshot,
+} from './memory-assist/calibration.js';
+import { getMemoryAssistDashboard } from './memory-assist/dashboard.js';
+import {
+  ensureObservationTypeCorrectionsTable,
+  recordObservationTypeCorrection,
+} from './memory-assist/taxonomy.js';
+import { judgeMemoryAssistDecision } from '../worker/MemoryAssistJudge.js';
+
+function normalizeMemoryAssistPath(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return value.replace(/\\/g, '/').trim().toLowerCase();
+}
+
+function collectSignalPaths(signal: MemoryAssistOutcomeSignal): Set<string> {
+  const paths = new Set<string>();
+  const primary = normalizeMemoryAssistPath(signal.filePath);
+  if (primary) paths.add(primary);
+  for (const related of signal.relatedFilePaths ?? []) {
+    const normalized = normalizeMemoryAssistPath(related);
+    if (normalized) paths.add(normalized);
+  }
+  return paths;
+}
+
+function collectDecisionPaths(decision: MemoryAssistDecisionRecord): Set<string> {
+  const paths = new Set<string>();
+  for (const item of decision.traceItems ?? []) {
+    const primary = normalizeMemoryAssistPath(item.filePath);
+    if (primary) paths.add(primary);
+    for (const related of item.relatedFilePaths ?? []) {
+      const normalized = normalizeMemoryAssistPath(related);
+      if (normalized) paths.add(normalized);
+    }
+  }
+  return paths;
+}
 
 function resolveCreateSessionArgs(
   customTitle?: string,
@@ -65,6 +150,82 @@ export class SessionStore {
     this.addSessionCustomTitleColumn();
     this.addSessionPlatformSourceColumn();
     this.addObservationModelColumns();
+    this.ensureObservationFeedbackTable();
+    this.ensureMemoryAssistTables();
+    this.createObservationsFTSIndex();
+    this.addObservationDecisionDNAFields();
+    this.addCaptureSnapshotTables();
+    this.addObservationContextOriginFields();
+    this.addMcpInvocationsTable();
+  }
+
+  /**
+   * Create FTS5 virtual table over observations for BM25 keyword search (migration 28)
+   *
+   * Duplicates MigrationRunner.createObservationsFTSIndex so the worker's SessionStore
+   * path (the one actually invoked at production startup — see `worker/DatabaseManager.ts`)
+   * ensures the index exists. Previously the FTS table was only created lazily by
+   * `SessionSearch.ensureFTSTables` on first search; centralizing it here closes the gap
+   * and makes the schema version (28) record against the same DB the worker uses.
+   *
+   * Column set matches migration 21's trigger recreation: title, subtitle, narrative,
+   * text, facts, concepts. External-content FTS5 (content='observations') stores only
+   * the token index — no row duplication. Three triggers keep the index in sync; a
+   * rebuild populates existing rows on first creation.
+   *
+   * Graceful: if FTS5 is unavailable (e.g. Bun on Windows #791), logs a warning and
+   * continues — the existing Chroma/LIKE fallback handles search.
+   */
+  private createObservationsFTSIndex(): void {
+    const hasFTSTable = (this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='observations_fts'"
+    ).all() as { name: string }[]).length > 0;
+
+    try {
+      if (!hasFTSTable) {
+        this.db.run(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
+            title, subtitle, narrative, text, facts, concepts,
+            content='observations', content_rowid='id',
+            tokenize='porter unicode61'
+          )
+        `);
+
+        this.db.run(`
+          CREATE TRIGGER IF NOT EXISTS observations_ai AFTER INSERT ON observations BEGIN
+            INSERT INTO observations_fts(rowid, title, subtitle, narrative, text, facts, concepts)
+            VALUES (new.id, new.title, new.subtitle, new.narrative, new.text, new.facts, new.concepts);
+          END
+        `);
+
+        this.db.run(`
+          CREATE TRIGGER IF NOT EXISTS observations_ad AFTER DELETE ON observations BEGIN
+            INSERT INTO observations_fts(observations_fts, rowid, title, subtitle, narrative, text, facts, concepts)
+            VALUES('delete', old.id, old.title, old.subtitle, old.narrative, old.text, old.facts, old.concepts);
+          END
+        `);
+
+        this.db.run(`
+          CREATE TRIGGER IF NOT EXISTS observations_au AFTER UPDATE ON observations BEGIN
+            INSERT INTO observations_fts(observations_fts, rowid, title, subtitle, narrative, text, facts, concepts)
+            VALUES('delete', old.id, old.title, old.subtitle, old.narrative, old.text, old.facts, old.concepts);
+            INSERT INTO observations_fts(rowid, title, subtitle, narrative, text, facts, concepts)
+            VALUES (new.id, new.title, new.subtitle, new.narrative, new.text, new.facts, new.concepts);
+          END
+        `);
+
+        // External-content FTS5 needs `rebuild` to actually tokenize existing rows —
+        // direct INSERT only registers rowid mappings without building the token index.
+        this.db.run("INSERT INTO observations_fts(observations_fts) VALUES('rebuild')");
+
+        logger.debug('DB', 'SessionStore: Created observations_fts virtual table, sync triggers, and backfilled existing rows');
+      }
+    } catch (ftsError: unknown) {
+      logger.warn('DB', 'FTS5 not available, observations_fts index skipped', {}, ftsError as Error);
+    }
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(28, new Date().toISOString());
+    logger.debug('DB', 'SessionStore: Observations FTS5 index ensured');
   }
 
   /**
@@ -945,6 +1106,287 @@ export class SessionStore {
   }
 
   /**
+   * Ensure observation_feedback table exists for memory-assist feedback stats (migration 27)
+   */
+  private ensureObservationFeedbackTable(): void {
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS observation_feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        observation_id INTEGER NOT NULL,
+        signal_type TEXT NOT NULL,
+        session_db_id INTEGER,
+        created_at_epoch INTEGER NOT NULL,
+        metadata TEXT,
+        FOREIGN KEY (observation_id) REFERENCES observations(id) ON DELETE CASCADE
+      )
+    `);
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_feedback_observation ON observation_feedback(observation_id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_feedback_signal ON observation_feedback(signal_type)');
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(27, new Date().toISOString());
+  }
+
+  private ensureMemoryAssistTables(): void {
+    ensureMemoryAssistDecisionsTable(this.db);
+    ensureMemoryAssistOutcomeSignalsTable(this.db);
+    ensureObservationToolOriginsTable(this.db);
+    ensureMemoryAssistCalibrationTable(this.db);
+    ensureObservationTypeCorrectionsTable(this.db);
+  }
+
+  /**
+   * Add why / alternatives_rejected / related_observation_ids to observations (migration 29)
+   *
+   * Duplicates MigrationRunner.migrateToV29 so the worker's SessionStore path (the
+   * one actually invoked at production startup) applies the schema change. An audit
+   * (N=30 observations) found 53% captured no rationale because the capture prompt
+   * never asked for it. These three columns hold the decision DNA so future sessions
+   * see not just WHAT changed but WHY and what was rejected.
+   *
+   * Also extends observations_fts to include `why` + `alternatives_rejected` so
+   * rationale content is searchable. `related_observation_ids` stores integers as
+   * JSON text and is excluded from full-text search.
+   *
+   * Idempotent: checks actual column presence before ALTER and checks FTS column
+   * list before DROP/recreate so cross-machine DB sync or partial runs don't fail.
+   */
+  private addObservationDecisionDNAFields(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(29) as SchemaVersion | undefined;
+
+    // Even if version is marked applied, verify columns exist — belt-and-suspenders
+    // for cross-machine DB sync where schema_versions could ship ahead of columns.
+    const tableInfo = this.db.query('PRAGMA table_info(observations)').all() as TableColumnInfo[];
+    const names = new Set(tableInfo.map(col => col.name));
+    const needWhy = !names.has('why');
+    const needAlt = !names.has('alternatives_rejected');
+    const needRel = !names.has('related_observation_ids');
+
+    if (applied && !needWhy && !needAlt && !needRel) return;
+
+    if (needWhy) this.db.run('ALTER TABLE observations ADD COLUMN why TEXT');
+    if (needAlt) this.db.run('ALTER TABLE observations ADD COLUMN alternatives_rejected TEXT');
+    if (needRel) this.db.run('ALTER TABLE observations ADD COLUMN related_observation_ids TEXT');
+
+    // Extend FTS5 to include why + alternatives_rejected. External-content FTS5 has
+    // no ALTER TABLE, so we DROP + recreate. Skip gracefully if FTS5 is unavailable.
+    try {
+      const hasFTSTable = (this.db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='observations_fts'"
+      ).all() as { name: string }[]).length > 0;
+
+      if (hasFTSTable) {
+        const ftsCols = this.db.query('PRAGMA table_info(observations_fts)').all() as TableColumnInfo[];
+        const ftsHasWhy = ftsCols.some(col => col.name === 'why');
+
+        if (!ftsHasWhy) {
+          this.db.run('DROP TRIGGER IF EXISTS observations_ai');
+          this.db.run('DROP TRIGGER IF EXISTS observations_ad');
+          this.db.run('DROP TRIGGER IF EXISTS observations_au');
+          this.db.run('DROP TABLE IF EXISTS observations_fts');
+
+          this.db.run(`
+            CREATE VIRTUAL TABLE observations_fts USING fts5(
+              title, subtitle, narrative, text, facts, concepts, why, alternatives_rejected,
+              content='observations', content_rowid='id',
+              tokenize='porter unicode61'
+            )
+          `);
+
+          this.db.run(`
+            CREATE TRIGGER observations_ai AFTER INSERT ON observations BEGIN
+              INSERT INTO observations_fts(rowid, title, subtitle, narrative, text, facts, concepts, why, alternatives_rejected)
+              VALUES (new.id, new.title, new.subtitle, new.narrative, new.text, new.facts, new.concepts, new.why, new.alternatives_rejected);
+            END
+          `);
+
+          this.db.run(`
+            CREATE TRIGGER observations_ad AFTER DELETE ON observations BEGIN
+              INSERT INTO observations_fts(observations_fts, rowid, title, subtitle, narrative, text, facts, concepts, why, alternatives_rejected)
+              VALUES('delete', old.id, old.title, old.subtitle, old.narrative, old.text, old.facts, old.concepts, old.why, old.alternatives_rejected);
+            END
+          `);
+
+          this.db.run(`
+            CREATE TRIGGER observations_au AFTER UPDATE ON observations BEGIN
+              INSERT INTO observations_fts(observations_fts, rowid, title, subtitle, narrative, text, facts, concepts, why, alternatives_rejected)
+              VALUES('delete', old.id, old.title, old.subtitle, old.narrative, old.text, old.facts, old.concepts, old.why, old.alternatives_rejected);
+              INSERT INTO observations_fts(rowid, title, subtitle, narrative, text, facts, concepts, why, alternatives_rejected)
+              VALUES (new.id, new.title, new.subtitle, new.narrative, new.text, new.facts, new.concepts, new.why, new.alternatives_rejected);
+            END
+          `);
+
+          this.db.run("INSERT INTO observations_fts(observations_fts) VALUES('rebuild')");
+          logger.debug('DB', 'SessionStore: rebuilt observations_fts with why + alternatives_rejected columns');
+        }
+      }
+    } catch (ftsError: unknown) {
+      logger.warn('DB', 'SessionStore: FTS5 extension for V29 skipped', {}, ftsError instanceof Error ? ftsError : undefined);
+    }
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(29, new Date().toISOString());
+    logger.debug('DB', 'SessionStore: migration V29 complete (why/alternatives_rejected/related_observation_ids)');
+  }
+
+  /**
+   * Add observation_capture_snapshots + observation_rubric_scores tables (migration 30)
+   *
+   * Duplicates MigrationRunner.migrateToV30 so the worker's SessionStore path
+   * (the one actually invoked at production startup) applies the schema
+   * change. See the migrations/runner.ts docblock for full rationale.
+   *
+   * Idempotent: CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS.
+   */
+  private addCaptureSnapshotTables(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(30) as SchemaVersion | undefined;
+
+    // Belt-and-suspenders: verify tables exist even if the version is marked
+    // applied (cross-machine DB sync can ship schema_versions ahead of tables).
+    const tableNames = this.db
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('observation_capture_snapshots','observation_rubric_scores')")
+      .all() as TableNameRow[];
+    const existing = new Set(tableNames.map(r => r.name));
+    const needSnapshot = !existing.has('observation_capture_snapshots');
+    const needRubric = !existing.has('observation_rubric_scores');
+
+    if (applied && !needSnapshot && !needRubric) return;
+
+    if (needSnapshot) {
+      this.db.run(`
+        CREATE TABLE IF NOT EXISTS observation_capture_snapshots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          observation_id INTEGER NOT NULL,
+          memory_session_id TEXT,
+          content_session_id TEXT,
+          prompt_number INTEGER,
+          user_prompt TEXT,
+          prior_assistant_message TEXT,
+          tool_name TEXT,
+          tool_input TEXT,
+          tool_output TEXT,
+          cwd TEXT,
+          captured_type TEXT,
+          captured_title TEXT,
+          captured_subtitle TEXT,
+          captured_narrative TEXT,
+          captured_facts TEXT,
+          captured_concepts TEXT,
+          captured_why TEXT,
+          captured_alternatives_rejected TEXT,
+          captured_related_observation_ids TEXT,
+          created_at_epoch INTEGER NOT NULL,
+          FOREIGN KEY (observation_id) REFERENCES observations(id) ON DELETE CASCADE
+        )
+      `);
+      this.db.run('CREATE INDEX IF NOT EXISTS idx_capture_snapshot_obs ON observation_capture_snapshots(observation_id)');
+      this.db.run('CREATE INDEX IF NOT EXISTS idx_capture_snapshot_created ON observation_capture_snapshots(created_at_epoch DESC)');
+    }
+
+    if (needRubric) {
+      this.db.run(`
+        CREATE TABLE IF NOT EXISTS observation_rubric_scores (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          observation_id INTEGER NOT NULL,
+          snapshot_id INTEGER,
+          judge_model TEXT,
+          fidelity REAL,
+          intent_fit REAL,
+          concept_accuracy REAL,
+          type_correctness REAL,
+          ceiling_flagged INTEGER,
+          judge_notes TEXT,
+          scored_at_epoch INTEGER NOT NULL,
+          FOREIGN KEY (observation_id) REFERENCES observations(id) ON DELETE CASCADE
+        )
+      `);
+      this.db.run('CREATE INDEX IF NOT EXISTS idx_rubric_obs ON observation_rubric_scores(observation_id)');
+      this.db.run('CREATE INDEX IF NOT EXISTS idx_rubric_scored ON observation_rubric_scores(scored_at_epoch DESC)');
+    }
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(30, new Date().toISOString());
+    logger.debug('DB', 'SessionStore: migration V30 complete (observation_capture_snapshots + observation_rubric_scores)');
+  }
+
+  /**
+   * Add context-origin columns to observation_tool_origins (migration 31)
+   *
+   * Duplicates MigrationRunner.migrateToV31 so the worker's SessionStore path
+   * (the one actually invoked at production startup) applies the schema
+   * change. See the migrations/runner.ts docblock for full rationale.
+   *
+   * Idempotent: verifies column presence via PRAGMA before ALTER so partial
+   * runs or cross-machine DB sync don't fail.
+   */
+  private addObservationContextOriginFields(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(31) as SchemaVersion | undefined;
+
+    const cols = this.db.query('PRAGMA table_info(observation_tool_origins)').all() as TableColumnInfo[];
+    // Fresh DB: table doesn't exist. It'll be created by ensureOriginsTables
+    // with the full schema already including context columns. Mark V31 applied
+    // and short-circuit to avoid ALTER TABLE on non-existent table.
+    if (cols.length === 0) {
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(31, new Date().toISOString());
+      return;
+    }
+    const names = new Set(cols.map(col => col.name));
+    const needContextType = !names.has('context_type');
+    const needContextRef = !names.has('context_ref_json');
+
+    if (applied && !needContextType && !needContextRef) return;
+
+    if (needContextType) {
+      this.db.run('ALTER TABLE observation_tool_origins ADD COLUMN context_type TEXT');
+    }
+    if (needContextRef) {
+      this.db.run('ALTER TABLE observation_tool_origins ADD COLUMN context_ref_json TEXT');
+    }
+
+    this.db.run('DROP INDEX IF EXISTS idx_observation_tool_origins_observation_pending');
+    this.db.run(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_observation_tool_origins_observation_pending_context ' +
+      'ON observation_tool_origins(observation_id, COALESCE(pending_message_id, -1), COALESCE(context_type, \'\'))'
+    );
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_observation_tool_origins_context_type ON observation_tool_origins(context_type)');
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(31, new Date().toISOString());
+    logger.debug('DB', 'SessionStore: migration V31 complete (context_type + context_ref_json on observation_tool_origins)');
+  }
+
+  /**
+   * Create mcp_invocations table for MCP tool call logging (migration 32)
+   *
+   * Duplicates MigrationRunner.migrateToV32 so the worker's SessionStore path
+   * (the one actually invoked at production startup) applies the schema.
+   * See the migrations/runner.ts docblock for the dual-path rationale.
+   *
+   * Idempotent: checks table existence before DDL to handle fresh DBs where
+   * CREATE TABLE IF NOT EXISTS makes the schema_versions guard unnecessary for
+   * the DDL itself, but we still skip if both version row AND table exist.
+   */
+  private addMcpInvocationsTable(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(32) as SchemaVersion | undefined;
+    const tableCheck = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='mcp_invocations'").get() as { name: string } | undefined;
+
+    if (applied && tableCheck) return;
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS mcp_invocations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tool_name TEXT NOT NULL,
+        args_summary TEXT,
+        result_status TEXT NOT NULL,
+        error_message TEXT,
+        duration_ms INTEGER,
+        invoked_at_epoch INTEGER NOT NULL
+      )
+    `);
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_mcp_invocations_tool_time ON mcp_invocations(tool_name, invoked_at_epoch DESC)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_mcp_invocations_time ON mcp_invocations(invoked_at_epoch DESC)');
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(32, new Date().toISOString());
+    logger.debug('DB', 'SessionStore: migration V32 complete (mcp_invocations table)');
+  }
+
+  /**
    * Update the memory session ID for a session
    * Called by SDKAgent when it captures the session ID from the first SDK message
    * Also used to RESET to null on stale resume failures (worker-service.ts)
@@ -1285,6 +1727,43 @@ export class SessionStore {
   }
 
   /**
+   * Get the latest saved user prompt timestamp for a session.
+   * Used by worker wall-clock guards so active prompting resets the age budget.
+   */
+  getLatestUserPromptEpoch(contentSessionId: string): number | null {
+    const stmt = this.db.prepare(`
+      SELECT MAX(created_at_epoch) as latest_epoch
+      FROM user_prompts
+      WHERE content_session_id = ?
+    `);
+
+    const result = stmt.get(contentSessionId) as { latest_epoch: number | null } | undefined;
+    return result?.latest_epoch ?? null;
+  }
+
+  /**
+   * Get the latest pending-work activity timestamp for a session.
+   * Considers both enqueue time and processing start time for in-flight work.
+   */
+  getLatestPendingWorkEpoch(sessionDbId: number): number | null {
+    const stmt = this.db.prepare(`
+      SELECT MAX(epoch) as latest_epoch
+      FROM (
+        SELECT created_at_epoch as epoch
+        FROM pending_messages
+        WHERE session_db_id = ? AND status IN ('pending', 'processing')
+        UNION ALL
+        SELECT started_processing_at_epoch as epoch
+        FROM pending_messages
+        WHERE session_db_id = ? AND status = 'processing' AND started_processing_at_epoch IS NOT NULL
+      )
+    `);
+
+    const result = stmt.get(sessionDbId, sessionDbId) as { latest_epoch: number | null } | undefined;
+    return result?.latest_epoch ?? null;
+  }
+
+  /**
    * Get recent sessions with their status and summary info
    */
   getRecentSessionsWithStatus(project: string, limit: number = 3): Array<{
@@ -1346,6 +1825,331 @@ export class SessionStore {
     `);
 
     return stmt.get(id) as ObservationRecord | undefined || null;
+  }
+
+  getObservationOrigin(id: number): ObservationToolOriginRecord | null {
+    return getObservationOrigin(this.db, id);
+  }
+
+  recordObservationFeedback(
+    observationIds: number[],
+    signalType: ObservationFeedbackSignal,
+    sessionDbId?: number | null,
+    metadata?: Record<string, unknown>
+  ): void {
+    recordObservationFeedback(this.db, observationIds, signalType, sessionDbId, metadata);
+  }
+
+  getObservationFeedbackStats(windowDays = 30): ObservationFeedbackStats {
+    return getObservationFeedbackStats(this.db, windowDays);
+  }
+
+  recordMemoryAssistDecision(
+    report: MemoryAssistReport & {
+      shadowRanking?: MemoryAssistDecisionRecord['shadowRanking'];
+      systemVerdict?: MemoryAssistDecisionRecord['systemVerdict'];
+      systemConfidence?: MemoryAssistDecisionRecord['systemConfidence'];
+      systemReasons?: string[];
+      systemEvidence?: MemoryAssistDecisionRecord['systemEvidence'];
+    }
+  ): MemoryAssistDecisionRecord {
+    const derivedPromptNumber = report.contentSessionId
+      ? this.getPromptNumberFromUserPrompts(report.contentSessionId)
+      : undefined;
+    const promptNumber = report.promptNumber
+      ?? (derivedPromptNumber && derivedPromptNumber > 0 ? derivedPromptNumber : undefined);
+    const decision = recordMemoryAssistDecision(this.db, {
+      ...report,
+      promptNumber,
+    });
+    return this.refreshMemoryAssistDecisionVerdict(decision.id) ?? decision;
+  }
+
+  getRecentMemoryAssistDecisions(
+    options: {
+      limit?: number;
+      windowDays?: number;
+      source?: MemoryAssistDecisionRecord['source'];
+      project?: string;
+      contentSessionId?: string;
+    } = {}
+  ): MemoryAssistDecisionRecord[] {
+    return getRecentMemoryAssistDecisions(this.db, options);
+  }
+
+  recordMemoryAssistOutcomeSignal(signal: MemoryAssistOutcomeSignal): MemoryAssistOutcomeSignal {
+    const promptNumber = signal.promptNumber
+      ?? (typeof signal.metadata?.promptNumber === 'number' ? signal.metadata.promptNumber : undefined);
+    const decisionId = signal.decisionId
+      ?? this.resolveMemoryAssistDecisionId({
+        ...signal,
+        promptNumber,
+      });
+
+    const persisted = recordMemoryAssistOutcomeSignal(this.db, {
+      ...signal,
+      promptNumber,
+      decisionId,
+    });
+
+    if (decisionId) {
+      this.refreshMemoryAssistDecisionVerdict(decisionId);
+    }
+
+    return persisted;
+  }
+
+  attachGeneratedObservationsToOutcomeSignal(
+    pendingMessageId: number,
+    observationIds: number[]
+  ): MemoryAssistOutcomeSignal | null {
+    if (observationIds.length === 0) return null;
+
+    const merged = attachGeneratedObservationsToOutcomeSignal(this.db, pendingMessageId, observationIds);
+    if (merged.length === 0) return null;
+
+    const outcome = this.db.prepare(`
+      SELECT *
+      FROM memory_assist_outcome_signals
+      WHERE pending_message_id = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(pendingMessageId) as {
+      id: number;
+      decision_id: number | null;
+      source: string | null;
+      prompt_number: number | null;
+      content_session_id: string | null;
+      session_db_id: number | null;
+      project: string | null;
+      platform_source: string | null;
+      signal_type: string;
+      tool_name: string;
+      action: string;
+      file_path: string | null;
+      related_file_paths_json: string | null;
+      concepts_json: string | null;
+      generated_observation_ids_json: string | null;
+      metadata_json: string | null;
+      created_at_epoch: number;
+    } | undefined;
+
+    if (!outcome) return null;
+
+    const hydrated: MemoryAssistOutcomeSignal = {
+      id: outcome.id,
+      decisionId: outcome.decision_id,
+      pendingMessageId,
+      source: outcome.source as MemoryAssistOutcomeSignal['source'],
+      promptNumber: outcome.prompt_number ?? undefined,
+      contentSessionId: outcome.content_session_id ?? undefined,
+      sessionDbId: outcome.session_db_id ?? undefined,
+      project: outcome.project ?? undefined,
+      platformSource: outcome.platform_source ?? undefined,
+      signalType: outcome.signal_type as MemoryAssistOutcomeSignal['signalType'],
+      toolName: outcome.tool_name,
+      action: outcome.action as MemoryAssistOutcomeSignal['action'],
+      filePath: outcome.file_path,
+      relatedFilePaths: outcome.related_file_paths_json ? JSON.parse(outcome.related_file_paths_json) : [],
+      concepts: outcome.concepts_json ? JSON.parse(outcome.concepts_json) : [],
+      generatedObservationIds: merged,
+      metadata: outcome.metadata_json ? JSON.parse(outcome.metadata_json) : {},
+      timestamp: outcome.created_at_epoch,
+    };
+
+    if (hydrated.decisionId) {
+      this.refreshMemoryAssistDecisionVerdict(hydrated.decisionId);
+    }
+
+    return hydrated;
+  }
+
+  attachObservationOriginsToPendingMessage(
+    pendingMessageId: number,
+    observationIds: number[]
+  ): ObservationToolOriginRecord[] {
+    return attachObservationOriginsToPendingMessage(this.db, pendingMessageId, observationIds);
+  }
+
+  /**
+   * Register a context-based origin for observations that did not come from a
+   * tool call. See memory-assist/origins.ts docblock for the "why".
+   */
+  insertContextOrigin(
+    observationId: number,
+    contextType: ObservationContextType,
+    contextRef: Record<string, unknown>,
+    createdAtEpoch?: number
+  ): ObservationToolOriginRecord | null {
+    return insertContextOrigin(this.db, observationId, contextType, contextRef, createdAtEpoch);
+  }
+
+  /**
+   * Return all origin rows (tool-based + context-based) for an observation.
+   * Used by the trace endpoint so the UI can render whichever kind exists.
+   */
+  getObservationOrigins(observationId: number): ObservationToolOriginRecord[] {
+    return getObservationOrigins(this.db, observationId);
+  }
+
+  private resolveMemoryAssistDecisionId(signal: MemoryAssistOutcomeSignal): number | null {
+    if (!signal.contentSessionId || !signal.promptNumber) {
+      return null;
+    }
+
+    const candidates = getMemoryAssistDecisionsForPrompt(
+      this.db,
+      signal.contentSessionId,
+      signal.promptNumber,
+      15 * 60 * 1000
+    );
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const signalPaths = collectSignalPaths(signal);
+    const injectedCandidates = candidates.filter((decision) => decision.status === 'injected');
+    const overlappingFileCandidates = injectedCandidates.filter((decision) => {
+      if (decision.source !== 'file_context') return false;
+      if (signalPaths.size === 0) return false;
+      const decisionPaths = collectDecisionPaths(decision);
+      return [...signalPaths].some((path) => decisionPaths.has(path));
+    });
+    if (overlappingFileCandidates.length === 1) {
+      return overlappingFileCandidates[0].id;
+    }
+
+    const semanticCandidates = injectedCandidates.filter((decision) => decision.source === 'semantic_prompt');
+    if (semanticCandidates.length === 1) {
+      return semanticCandidates[0].id;
+    }
+
+    if (injectedCandidates.length === 1) {
+      return injectedCandidates[0].id;
+    }
+
+    return null;
+  }
+
+  attachMemoryAssistDecisionFeedback(
+    decisionId: number,
+    label: MemoryAssistFeedbackLabel
+  ): void {
+    attachMemoryAssistDecisionFeedback(this.db, decisionId, label);
+    this.refreshMemoryAssistDecisionVerdict(decisionId, label);
+  }
+
+  getMemoryAssistDashboard(windowDays = 30): MemoryAssistDashboard & ObservationFeedbackStats {
+    // Dashboard aggregates must reflect the full window, not a top-N clamp.
+    // A prior session raised the cap in decisions.ts from 200 to 10_000 but left
+    // this dashboard path silently clamped at 500, so 30-day windows with >500
+    // decisions produced systematically under-counted rates, wrong recommended
+    // actions (confidence 80% on bad data), and misleading skip-reason charts.
+    // 10_000 matches the decisions.ts convention and covers any realistic window.
+    const decisions = getRecentMemoryAssistDecisions(this.db, { limit: 10_000, windowDays });
+    return getMemoryAssistDashboard(this.db, decisions, windowDays);
+  }
+
+  backfillRecentFileContextTokenEstimates(
+    options: {
+      limit?: number;
+      windowDays?: number;
+    } = {}
+  ): { updatedCount: number } {
+    const decisions = getRecentMemoryAssistDecisions(this.db, {
+      limit: options.limit ?? 200,
+      windowDays: options.windowDays ?? 30,
+      source: 'file_context',
+    });
+
+    let updatedCount = 0;
+    for (const decision of decisions) {
+      if (decision.status !== 'injected') continue;
+      if ((decision.estimatedInjectedTokens ?? 0) > 0) continue;
+      const estimate = estimateTimelineTokensFromTraceItems(decision.traceItems, decision.filePath);
+      if (estimate <= 0) continue;
+      this.db.prepare(`
+        UPDATE memory_assist_decisions
+        SET estimated_injected_tokens = ?,
+            updated_at_epoch = ?
+        WHERE id = ?
+      `).run(estimate, Date.now(), decision.id);
+      updatedCount += 1;
+    }
+
+    logger.debug('DB', `memory-assist-decisions: backfilled file-context token estimates for ${updatedCount} decisions`);
+    return { updatedCount };
+  }
+
+  backfillRecentMemoryAssistEvidence(
+    options: {
+      limit?: number;
+      windowDays?: number;
+    } = {}
+  ): MemoryAssistDecisionRecord[] {
+    const decisions = getRecentMemoryAssistDecisions(this.db, {
+      limit: options.limit ?? 200,
+      windowDays: options.windowDays ?? 30,
+    });
+
+    const refreshed = decisions.map((decision) => (
+      this.refreshMemoryAssistDecisionVerdict(decision.id) ?? decision
+    ));
+
+    return refreshed;
+  }
+
+  backfillRecentObservationOrigins(
+    options: {
+      limit?: number;
+      windowDays?: number;
+    } = {}
+  ): { resolvedCount: number; unresolvedCount: number } {
+    return backfillRecentObservationOrigins(this.db, options);
+  }
+
+  getMemoryAssistCalibrationSnapshot(): MemoryAssistCalibrationSnapshot {
+    return getMemoryAssistCalibrationSnapshot(this.db);
+  }
+
+  recordObservationTypeCorrection(input: {
+    modeId: string;
+    originalType: string;
+    normalizedType: string;
+    fallbackType: string;
+    strategy: 'alias' | 'fallback';
+    correlationId?: string;
+    project?: string;
+    platformSource?: string;
+  }): void {
+    recordObservationTypeCorrection(this.db, input);
+  }
+
+  private refreshMemoryAssistDecisionVerdict(
+    decisionId: number,
+    feedback?: MemoryAssistFeedbackLabel | null
+  ): MemoryAssistDecisionRecord | null {
+    const [decision] = getDecisionRowsForIds(this.db, [decisionId]);
+    if (!decision) return null;
+
+    const outcomesByDecisionId = getOutcomeSignalsForDecisionIds(this.db, [decisionId]);
+    const result = judgeMemoryAssistDecision(
+      decision,
+      outcomesByDecisionId[decisionId] ?? [],
+      feedback
+    );
+
+    updateMemoryAssistDecisionVerdict(
+      this.db,
+      decisionId,
+      result.verdict,
+      result.confidence,
+      result.reasons,
+      result.evidence
+    );
+
+    return getDecisionRowsForIds(this.db, [decisionId])[0] ?? null;
   }
 
   /**
@@ -1701,11 +2505,15 @@ export class SessionStore {
       concepts: string[];
       files_read: string[];
       files_modified: string[];
+      why?: string | null;
+      alternatives_rejected?: string | null;
+      related_observation_ids?: number[];
     },
     promptNumber?: number,
     discoveryTokens: number = 0,
     overrideTimestampEpoch?: number,
-    generatedByModel?: string
+    generatedByModel?: string,
+    captureSource?: CaptureSnapshotSource
   ): { id: number; createdAtEpoch: number } {
     // Use override timestamp if provided (for processing backlog messages with original timestamps)
     const timestampEpoch = overrideTimestampEpoch ?? Date.now();
@@ -1722,8 +2530,8 @@ export class SessionStore {
       INSERT INTO observations
       (memory_session_id, project, type, title, subtitle, facts, narrative, concepts,
        files_read, files_modified, prompt_number, discovery_tokens, content_hash, created_at, created_at_epoch,
-       generated_by_model)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       generated_by_model, why, alternatives_rejected, related_observation_ids)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const result = stmt.run(
@@ -1742,11 +2550,26 @@ export class SessionStore {
       contentHash,
       timestampIso,
       timestampEpoch,
-      generatedByModel || null
+      generatedByModel || null,
+      observation.why ?? null,
+      observation.alternatives_rejected ?? null,
+      observation.related_observation_ids && observation.related_observation_ids.length > 0
+        ? JSON.stringify(observation.related_observation_ids)
+        : null
+    );
+
+    const observationId = Number(result.lastInsertRowid);
+
+    insertCaptureSnapshot(
+      this.db,
+      observationId,
+      captureSource ?? emptyCaptureSnapshotSource(memorySessionId, null, promptNumber ?? null),
+      capturedFromObservation(observation),
+      timestampEpoch
     );
 
     return {
-      id: Number(result.lastInsertRowid),
+      id: observationId,
       createdAtEpoch: timestampEpoch
     };
   }
@@ -1830,6 +2653,9 @@ export class SessionStore {
       concepts: string[];
       files_read: string[];
       files_modified: string[];
+      why?: string | null;
+      alternatives_rejected?: string | null;
+      related_observation_ids?: number[];
     }>,
     summary: {
       request: string;
@@ -1842,7 +2668,8 @@ export class SessionStore {
     promptNumber?: number,
     discoveryTokens: number = 0,
     overrideTimestampEpoch?: number,
-    generatedByModel?: string
+    generatedByModel?: string,
+    captureSource?: CaptureSnapshotSource
   ): { observationIds: number[]; summaryId: number | null; createdAtEpoch: number } {
     // Use override timestamp if provided
     const timestampEpoch = overrideTimestampEpoch ?? Date.now();
@@ -1857,9 +2684,12 @@ export class SessionStore {
         INSERT INTO observations
         (memory_session_id, project, type, title, subtitle, facts, narrative, concepts,
          files_read, files_modified, prompt_number, discovery_tokens, content_hash, created_at, created_at_epoch,
-         generated_by_model)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         generated_by_model, why, alternatives_rejected, related_observation_ids)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
+
+      const snapshotSource =
+        captureSource ?? emptyCaptureSnapshotSource(memorySessionId, null, promptNumber ?? null);
 
       for (const observation of observations) {
         // Content-hash deduplication (same logic as storeObservation singular)
@@ -1886,9 +2716,25 @@ export class SessionStore {
           contentHash,
           timestampIso,
           timestampEpoch,
-          generatedByModel || null
+          generatedByModel || null,
+          observation.why ?? null,
+          observation.alternatives_rejected ?? null,
+          observation.related_observation_ids && observation.related_observation_ids.length > 0
+            ? JSON.stringify(observation.related_observation_ids)
+            : null
         );
-        observationIds.push(Number(result.lastInsertRowid));
+        const observationId = Number(result.lastInsertRowid);
+        observationIds.push(observationId);
+
+        // Capture snapshot pairs source inputs with captured outputs so later
+        // rubric runs have ground truth. Same transaction, same fate.
+        insertCaptureSnapshot(
+          this.db,
+          observationId,
+          snapshotSource,
+          capturedFromObservation(observation),
+          timestampEpoch
+        );
       }
 
       // 2. Store summary if provided
@@ -1960,6 +2806,9 @@ export class SessionStore {
       concepts: string[];
       files_read: string[];
       files_modified: string[];
+      why?: string | null;
+      alternatives_rejected?: string | null;
+      related_observation_ids?: number[];
     }>,
     summary: {
       request: string;
@@ -1974,7 +2823,8 @@ export class SessionStore {
     promptNumber?: number,
     discoveryTokens: number = 0,
     overrideTimestampEpoch?: number,
-    generatedByModel?: string
+    generatedByModel?: string,
+    captureSource?: CaptureSnapshotSource
   ): { observationIds: number[]; summaryId?: number; createdAtEpoch: number } {
     // Use override timestamp if provided
     const timestampEpoch = overrideTimestampEpoch ?? Date.now();
@@ -1989,9 +2839,12 @@ export class SessionStore {
         INSERT INTO observations
         (memory_session_id, project, type, title, subtitle, facts, narrative, concepts,
          files_read, files_modified, prompt_number, discovery_tokens, content_hash, created_at, created_at_epoch,
-         generated_by_model)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         generated_by_model, why, alternatives_rejected, related_observation_ids)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
+
+      const snapshotSource =
+        captureSource ?? emptyCaptureSnapshotSource(memorySessionId, null, promptNumber ?? null);
 
       for (const observation of observations) {
         // Content-hash deduplication (same logic as storeObservation singular)
@@ -2018,9 +2871,24 @@ export class SessionStore {
           contentHash,
           timestampIso,
           timestampEpoch,
-          generatedByModel || null
+          generatedByModel || null,
+          observation.why ?? null,
+          observation.alternatives_rejected ?? null,
+          observation.related_observation_ids && observation.related_observation_ids.length > 0
+            ? JSON.stringify(observation.related_observation_ids)
+            : null
         );
-        observationIds.push(Number(result.lastInsertRowid));
+        const observationId = Number(result.lastInsertRowid);
+        observationIds.push(observationId);
+
+        // Capture snapshot pairs source inputs with captured outputs (same transaction).
+        insertCaptureSnapshot(
+          this.db,
+          observationId,
+          snapshotSource,
+          capturedFromObservation(observation),
+          timestampEpoch
+        );
       }
 
       // 2. Store summary if provided
@@ -2436,6 +3304,43 @@ export class SessionStore {
     logger.info('SESSION', 'Created manual session', { memorySessionId, project });
 
     return memorySessionId;
+  }
+
+  /**
+   * Batch-fetch retrieval context (user_prompt, prior_assistant_message,
+   * content_session_id, prompt_number) for a set of observation IDs.
+   *
+   * Reads from observation_capture_snapshots (V30). If an observation has no
+   * snapshot row, its key is simply absent from the returned Map. When
+   * duplicates exist for the same observation_id, the latest by created_at_epoch
+   * wins — same tie-break as the capture audit queries.
+   */
+  getObservationRetrievalContext(
+    ids: number[]
+  ): Map<number, { user_prompt: string | null; prior_assistant_message: string | null; content_session_id: string | null; prompt_number: number | null }> {
+    const result = new Map<number, { user_prompt: string | null; prior_assistant_message: string | null; content_session_id: string | null; prompt_number: number | null }>();
+    if (ids.length === 0) return result;
+
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = this.db.prepare(`
+      SELECT observation_id, user_prompt, prior_assistant_message, content_session_id, prompt_number
+      FROM observation_capture_snapshots
+      WHERE observation_id IN (${placeholders})
+      GROUP BY observation_id
+      HAVING created_at_epoch = MAX(created_at_epoch)
+      ORDER BY observation_id
+    `).all(...ids) as Array<{ observation_id: number; user_prompt: string | null; prior_assistant_message: string | null; content_session_id: string | null; prompt_number: number | null }>;
+
+    for (const row of rows) {
+      result.set(row.observation_id, {
+        user_prompt: row.user_prompt,
+        prior_assistant_message: row.prior_assistant_message,
+        content_session_id: row.content_session_id,
+        prompt_number: row.prompt_number,
+      });
+    }
+
+    return result;
   }
 
   /**

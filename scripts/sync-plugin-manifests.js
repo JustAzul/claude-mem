@@ -10,6 +10,8 @@ const rootDir = path.resolve(__dirname, '..');
 const packageJsonPath = path.join(rootDir, 'package.json');
 const codexPluginPath = path.join(rootDir, '.codex-plugin', 'plugin.json');
 const claudePluginPath = path.join(rootDir, '.claude-plugin', 'plugin.json');
+const bundledClaudePluginPath = path.join(rootDir, 'plugin', '.claude-plugin', 'plugin.json');
+const marketplaceJsonPath = path.join(rootDir, '.claude-plugin', 'marketplace.json');
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -61,6 +63,20 @@ function syncClaudePlugin(plugin, pkg) {
   };
 }
 
+function syncMarketplace(marketplace, pkg) {
+  const plugins = Array.isArray(marketplace.plugins) ? marketplace.plugins : [];
+  return {
+    ...marketplace,
+    plugins: plugins.map((plugin) => plugin.name === 'claude-mem'
+      ? {
+          ...plugin,
+          version: pkg.version,
+          description: pkg.description,
+        }
+      : plugin),
+  };
+}
+
 function normalizeAuthorName(author) {
   if (typeof author === 'string') return author;
   if (author && typeof author === 'object' && typeof author.name === 'string') return author.name;
@@ -75,7 +91,7 @@ function normalizeRepositoryUrl(repository) {
 }
 
 function main() {
-  for (const filePath of [packageJsonPath, codexPluginPath, claudePluginPath]) {
+  for (const filePath of [packageJsonPath, codexPluginPath, claudePluginPath, bundledClaudePluginPath, marketplaceJsonPath]) {
     if (!fs.existsSync(filePath)) {
       console.error(`Missing required file: ${filePath}`);
       process.exit(1);
@@ -85,9 +101,13 @@ function main() {
   const pkg = readJson(packageJsonPath);
   const codexPlugin = readJson(codexPluginPath);
   const claudePlugin = readJson(claudePluginPath);
+  const bundledClaudePlugin = readJson(bundledClaudePluginPath);
+  const marketplace = readJson(marketplaceJsonPath);
 
   writeJson(codexPluginPath, syncCodexPlugin(codexPlugin, pkg));
   writeJson(claudePluginPath, syncClaudePlugin(claudePlugin, pkg));
+  writeJson(bundledClaudePluginPath, syncClaudePlugin(bundledClaudePlugin, pkg));
+  writeJson(marketplaceJsonPath, syncMarketplace(marketplace, pkg));
 
   console.log('✓ Synced plugin manifests from package.json');
 }

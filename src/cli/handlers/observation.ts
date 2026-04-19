@@ -12,6 +12,7 @@ import { isProjectExcluded } from '../../utils/project-filter.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
 import { USER_SETTINGS_PATH } from '../../shared/paths.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
+import { extractLastMessage } from '../../shared/transcript-parser.js';
 
 export const observationHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
@@ -22,7 +23,7 @@ export const observationHandler: EventHandler = {
       return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
     }
 
-    const { sessionId, cwd, toolName, toolInput, toolResponse } = input;
+    const { sessionId, cwd, toolName, toolInput, toolResponse, transcriptPath } = input;
     const platformSource = normalizePlatformSource(input.platform);
 
     if (!toolName) {
@@ -46,6 +47,21 @@ export const observationHandler: EventHandler = {
       return { continue: true, suppressOutput: true };
     }
 
+    // Extract the prior assistant message from the transcript so the capture
+    // snapshot carries turn context (powers Phase 4 retrieval-time rendering).
+    // Best-effort: a missing transcript or parse error must not drop the observation.
+    let lastAssistantMessage: string | null = null;
+    if (transcriptPath) {
+      try {
+        const extracted = extractLastMessage(transcriptPath, 'assistant', true);
+        if (extracted && extracted.trim()) {
+          lastAssistantMessage = extracted;
+        }
+      } catch (err: unknown) {
+        logger.debug('HOOK', `PostToolUse: failed to extract last assistant message for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     // Send to worker - worker handles privacy check and database operations
     try {
       const response = await workerHttpRequest('/api/sessions/observations', {
@@ -57,7 +73,8 @@ export const observationHandler: EventHandler = {
           tool_name: toolName,
           tool_input: toolInput,
           tool_response: toolResponse,
-          cwd
+          cwd,
+          last_assistant_message: lastAssistantMessage
         })
       });
 

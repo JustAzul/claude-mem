@@ -24,6 +24,24 @@ import type { SessionManager } from '../SessionManager.js';
 import type { WorkerRef, StorageResult } from './types.js';
 import { broadcastObservation, broadcastSummary } from './ObservationBroadcaster.js';
 import { cleanupProcessedMessages } from './SessionCleanupHelper.js';
+import { ModeManager } from '../../domain/ModeManager.js';
+import { extractToolMetadata } from '../../domain/ToolContextExtractor.js';
+import { normalizeConcepts } from '../../domain/ConceptNormalizer.js';
+import { applyObservationGates } from './observation-gates.js';
+import type { CaptureSnapshotSource } from '../../sqlite/observations/capture-snapshot.js';
+import type { ObservationContextType } from '../../sqlite/memory-assist/origins.js';
+import type { SessionStore } from '../../sqlite/SessionStore.js';
+
+/**
+ * Source tool context for a single observation message.
+ * Passed from agents so that ResponseProcessor can override LLM-inferred
+ * file lists and type with ground-truth values from the tool trace.
+ */
+export interface ToolContext {
+  tool_name: string;
+  /** Parsed tool input object (already JSON.parse'd by the caller, or raw string). */
+  tool_input: unknown;
+}
 
 /**
  * Process agent response text (parse XML, save to database, sync to Chroma, broadcast SSE)
@@ -44,6 +62,9 @@ import { cleanupProcessedMessages } from './SessionCleanupHelper.js';
  * @param discoveryTokens - Token cost delta for this response
  * @param originalTimestamp - Original epoch when message was queued (for accurate timestamps)
  * @param agentName - Name of the agent for logging (e.g., 'SDK', 'Gemini', 'OpenRouter')
+ * @param projectRoot - Optional project root for CLAUDE.md updates
+ * @param modelId - Optional model ID for telemetry
+ * @param toolContext - Optional source tool context for deterministic metadata override
  */
 export async function processAgentResponse(
   text: string,
@@ -55,7 +76,9 @@ export async function processAgentResponse(
   originalTimestamp: number | null,
   agentName: string,
   projectRoot?: string,
-  modelId?: string
+  modelId?: string,
+  toolContext?: ToolContext,
+  captureSource?: CaptureSnapshotSource
 ): Promise<void> {
   // Track generator activity for stale detection (Issue #1099)
   session.lastGeneratorActivity = Date.now();
@@ -66,8 +89,49 @@ export async function processAgentResponse(
   }
 
   // Parse observations and summary
-  const observations = parseObservations(text, session.contentSessionId);
+  const parsedObservations = parseObservations(text, session.contentSessionId);
   const summary = parseSummary(text, session.sessionDbId);
+
+  // OBS_GATE (Phase 2 E2): enforce taxonomy invariants the prompt declares.
+  //   - bugfix without <why>                     → downgrade to change
+  //   - decision without <why> or <alternatives> → downgrade to discovery
+  // Losing data is worse than a weaker label, so we downgrade, never reject.
+  // Each fire emits logger.warn('OBS_GATE', ...) so the rate can be grepped.
+  const observations = applyObservationGates(
+    parsedObservations,
+    agentName,
+    session.contentSessionId
+  );
+
+  // Normalize concepts on every observation regardless of whether a tool context is
+  // available. Init and summary responses can also produce <observation> blocks, and
+  // those must not bypass concept validation.
+  const activeModeForConcepts = ModeManager.getInstance().getActiveMode();
+  for (const obs of observations) {
+    obs.concepts = normalizeConcepts(obs.concepts, activeModeForConcepts);
+  }
+
+  // telemetry measures LLM→normalizer accuracy; snapshot types before post-processing
+  // overrides so the forced values (e.g. 'discovery' for Read/Grep) do not pollute
+  // LLM accuracy metrics — we want to measure what the normalizer produced, not what
+  // the deterministic override produced.
+  const preOverrideTypes = observations.map(obs => obs.type);
+
+  // Post-process observations: override structural metadata from tool trace.
+  // LLM inference for files_read/files_modified is ~100% wrong for read-only tools,
+  // and type accuracy is ~60%. Ground-truth values come from the tool call itself.
+  if (toolContext !== undefined && observations.length > 0) {
+    const meta = extractToolMetadata(toolContext.tool_name, toolContext.tool_input);
+
+    for (const obs of observations) {
+      obs.files_read = meta.files_read;
+      obs.files_modified = meta.files_modified;
+
+      if (meta.type_override !== undefined) {
+        obs.type = meta.type_override;
+      }
+    }
+  }
 
   if (
     text.trim() &&
@@ -87,6 +151,22 @@ export async function processAgentResponse(
 
   // Get session store for atomic transaction
   const sessionStore = dbManager.getSessionStore();
+  const activeMode = ModeManager.getInstance().getActiveMode();
+
+  for (let i = 0; i < observations.length; i++) {
+    const observation = observations[i];
+    if (!observation.original_type || !observation.normalized_type_strategy) continue;
+    sessionStore.recordObservationTypeCorrection({
+      modeId: activeMode.name || 'unknown',
+      originalType: observation.original_type,
+      normalizedType: preOverrideTypes[i],
+      fallbackType: observation.fallback_type || preOverrideTypes[i],
+      strategy: observation.normalized_type_strategy,
+      correlationId: session.contentSessionId,
+      project: session.project,
+      platformSource: session.platformSource,
+    });
+  }
 
   // CRITICAL: Must use memorySessionId (not contentSessionId) for FK constraint
   if (!session.memorySessionId) {
@@ -109,6 +189,10 @@ export async function processAgentResponse(
 
   // ATOMIC TRANSACTION: Store observations + summary ONCE
   // Messages are already deleted from queue on claim, so no completion tracking needed
+  //
+  // captureSource carries the raw inputs (tool_input, tool_output, user_prompt,
+  // prior_assistant_message, cwd) so V30 snapshot rows have ground truth to compare
+  // against captured observation fields. Agents set this per-message before yielding.
   const result = sessionStore.storeObservations(
     session.memorySessionId,
     session.project,
@@ -117,7 +201,8 @@ export async function processAgentResponse(
     session.lastPromptNumber,
     discoveryTokens,
     originalTimestamp ?? undefined,
-    modelId
+    modelId,
+    captureSource
   );
 
   // Log storage result with IDs for end-to-end traceability
@@ -129,6 +214,31 @@ export async function processAgentResponse(
   // Track whether a summary record was stored so the status endpoint can expose this
   // to the Stop hook for silent-summary-loss detection (#1633)
   session.lastSummaryStored = result.summaryId !== null;
+
+  const currentProcessingMessageId = session.processingMessageIds[session.processingMessageIds.length - 1] ?? null;
+  if (result.observationIds.length > 0 && currentProcessingMessageId != null) {
+    sessionStore.attachGeneratedObservationsToOutcomeSignal(currentProcessingMessageId, result.observationIds);
+    sessionStore.attachObservationOriginsToPendingMessage(currentProcessingMessageId, result.observationIds);
+    logger.debug('QUEUE', `ATTACHED_OBSERVATIONS | sessionDbId=${session.sessionDbId} | messageId=${currentProcessingMessageId} | observationIds=[${result.observationIds.join(',')}]`);
+  } else if (result.observationIds.length > 0 && currentProcessingMessageId == null) {
+    // No pending_message_id → observation was generated outside the tool-call
+    // queue path. This is the normal case for init-prompt responses, summary
+    // responses, and user-prompt-only turns. Historically we logged a
+    // "ORPHAN_OBSERVATIONS" warn and moved on; that left those observations
+    // with no row in observation_tool_origins and rendered in the trace modal
+    // as "No origin link found" forever (see obs #11779 for a concrete case).
+    //
+    // V31 fix: register a context-based origin so the trace endpoint can
+    // render something meaningful. We infer the context_type from session
+    // state rather than passing it through the signature — the information
+    // is already unambiguous at this point.
+    const contextType = inferContextType(session, summary);
+    const contextRef = buildContextRef(session, sessionStore);
+    for (const observationId of result.observationIds) {
+      sessionStore.insertContextOrigin(observationId, contextType, contextRef, result.createdAtEpoch);
+    }
+    logger.debug('QUEUE', `CONTEXT_ORIGIN_ATTACHED | sessionDbId=${session.sessionDbId} | obsIds=[${result.observationIds.join(',')}] | contextType=${contextType}`);
+  }
 
   // CLAIM-CONFIRM: Now that storage succeeded, confirm all processing messages (delete from queue)
   // This is the critical step that prevents message loss on generator crash
@@ -264,7 +374,7 @@ async function syncAndBroadcastObservations(
   const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
   // Handle both string 'true' and boolean true from JSON settings
   const settingValue = settings.CLAUDE_MEM_FOLDER_CLAUDEMD_ENABLED;
-  const folderClaudeMdEnabled = settingValue === 'true' || settingValue === true;
+  const folderClaudeMdEnabled = settingValue === 'true';
 
   if (folderClaudeMdEnabled) {
     const allFilePaths: string[] = [];
@@ -346,6 +456,73 @@ async function syncAndBroadcastSummary(
 
   // Update Cursor context file for registered projects (fire-and-forget)
   updateCursorContextForProject(session.project, getWorkerPort()).catch(error => {
-    logger.warn('CURSOR', 'Context update failed (non-critical)', { project: session.project }, error as Error);
+    logger.warn('SYSTEM', 'Cursor context update failed (non-critical)', { project: session.project }, error as Error);
   });
+}
+
+// ============================================================================
+// Context-origin helpers (V31)
+//
+// Observations that are emitted outside the tool-call queue (init prompt
+// response, summary prompt response, continuation without any tool use, or a
+// turn that only contained a user prompt) have no pending_message_id. Before
+// V31 we logged "ORPHAN_OBSERVATIONS" and moved on — leaving those rows with
+// no origin link forever. The helpers below infer what KIND of context
+// produced the observation so `insertContextOrigin` can record a meaningful
+// origin for the trace modal.
+//
+// Inference precedence (most specific wins):
+//   summary present        → 'summary_prompt'
+//   lastPromptNumber === 1 → 'init_prompt'
+//   lastPromptNumber > 1   → 'continuation_prompt'
+//   fallback               → 'user_prompt'
+//
+// The ref payload always carries sessionDbId / contentSessionId /
+// promptNumber; when a matching row exists in user_prompts we also include
+// user_prompt_id so the UI can link back to the exact prompt row.
+// ============================================================================
+
+interface UserPromptIdRow {
+  id: number;
+}
+
+function inferContextType(
+  session: ActiveSession,
+  summary: ParsedSummary | null
+): ObservationContextType {
+  if (summary !== null) return 'summary_prompt';
+  if (session.lastPromptNumber === 1) return 'init_prompt';
+  if (session.lastPromptNumber > 1) return 'continuation_prompt';
+  return 'user_prompt';
+}
+
+function buildContextRef(
+  session: ActiveSession,
+  sessionStore: SessionStore
+): Record<string, unknown> {
+  const ref: Record<string, unknown> = {
+    sessionDbId: session.sessionDbId,
+    contentSessionId: session.contentSessionId,
+    promptNumber: session.lastPromptNumber,
+  };
+
+  if (session.contentSessionId && Number.isFinite(session.lastPromptNumber)) {
+    try {
+      const row = sessionStore.db
+        .prepare('SELECT id FROM user_prompts WHERE content_session_id = ? AND prompt_number = ? LIMIT 1')
+        .get(session.contentSessionId, session.lastPromptNumber) as UserPromptIdRow | undefined;
+      if (row?.id) {
+        ref.userPromptId = row.id;
+      }
+    } catch (error: unknown) {
+      logger.debug(
+        'QUEUE',
+        `buildContextRef: user_prompts lookup failed for session=${session.contentSessionId} prompt=${session.lastPromptNumber}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  return ref;
 }

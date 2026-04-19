@@ -74,6 +74,7 @@ export interface ObservationData {
   tool_response: any;
   prompt_number: number;
   cwd?: string;
+  last_assistant_message?: string;
 }
 
 // ============================================================================

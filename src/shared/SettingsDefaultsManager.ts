@@ -70,6 +70,9 @@ export interface SettingsDefaults {
   // Semantic Context Injection (per-prompt via Chroma)
   CLAUDE_MEM_SEMANTIC_INJECT: string;        // 'true' | 'false' - inject relevant observations on each prompt
   CLAUDE_MEM_SEMANTIC_INJECT_LIMIT: string;  // Max observations to inject per prompt
+  CLAUDE_MEM_SEMANTIC_INJECT_THRESHOLD: string; // Max Chroma distance allowed for injection (lower = stricter)
+  // Calibration recommender gate (paused until Probe B ships a validated content-reuse signal)
+  CLAUDE_MEM_RECOMMENDER_PAUSED: string;     // 'true' | 'false' - short-circuit the calibration recommender to a banner
   // Tier Routing (model selection by queue complexity)
   CLAUDE_MEM_TIER_ROUTING_ENABLED: string;   // 'true' | 'false' - enable model tier routing
   CLAUDE_MEM_TIER_SIMPLE_MODEL: string;      // Tier alias or model ID for simple tool observations (Read, Glob, Grep)
@@ -149,6 +152,12 @@ export class SettingsDefaultsManager {
     // Semantic Context Injection (per-prompt via Chroma vector search)
     CLAUDE_MEM_SEMANTIC_INJECT: 'false',             // Inject relevant past observations on every UserPromptSubmit (experimental, disabled by default)
     CLAUDE_MEM_SEMANTIC_INJECT_LIMIT: '5',           // Top-N most relevant observations to inject per prompt
+    CLAUDE_MEM_SEMANTIC_INJECT_THRESHOLD: '0.35',    // Maximum Chroma distance to accept for prompt injection (lower = stricter)
+    // Calibration recommender is paused by default until Probe B lands a validated content-reuse signal.
+    // The current likelyHelpedRate is derived from path-overlap signals that fire on observation generation,
+    // not on injected-content reuse — a 2026-04 audit found 12/15 "likely_helped" samples were tautologies.
+    // Flip to 'false' when Probe B ships a trustworthy reuse signal.
+    CLAUDE_MEM_RECOMMENDER_PAUSED: 'true',
     // Tier Routing (model selection by queue complexity)
     CLAUDE_MEM_TIER_ROUTING_ENABLED: 'true',         // Route observations to models by complexity
     CLAUDE_MEM_TIER_SIMPLE_MODEL: 'haiku', // Portable tier alias — works across Direct API, Bedrock, Vertex, Azure (see #1463)

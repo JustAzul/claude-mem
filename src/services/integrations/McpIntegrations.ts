@@ -96,12 +96,16 @@ interface McpInstallerConfig {
  */
 function installMcpIntegration(config: McpInstallerConfig): () => Promise<number> {
   return async (): Promise<number> => {
-    console.log(`\nInstalling Claude-Mem MCP integration for ${config.ideLabel}...\n`);
+    process.stdout.write(`\nInstalling Claude-Mem MCP integration for ${config.ideLabel}...\n\n`);
 
     const mcpServerPath = findMcpServerPath();
     if (!mcpServerPath) {
-      console.error('Could not find MCP server script');
-      console.error('   Expected at: ~/.claude/plugins/marketplaces/thedotmack/plugin/scripts/mcp-server.cjs');
+      logger.error('SYSTEM', 'MCP integration install failed because the MCP server script was not found', {
+        ideId: config.ideId,
+        ideLabel: config.ideLabel,
+      });
+      process.stderr.write('Could not find MCP server script\n');
+      process.stderr.write('   Expected at: ~/.claude/plugins/marketplaces/thedotmack/plugin/scripts/mcp-server.cjs\n');
       return 1;
     }
 
@@ -111,10 +115,10 @@ function installMcpIntegration(config: McpInstallerConfig): () => Promise<number
 
       // Warp special case: skip config write if ~/.warp/ doesn't exist
       if (config.ideId === 'warp' && !existsSync(path.dirname(configPath))) {
-        console.log(`  Note: ~/.warp/ not found. MCP may need to be configured via Warp Drive UI.`);
+        process.stdout.write('  Note: ~/.warp/ not found. MCP may need to be configured via Warp Drive UI.\n');
       } else {
         writeMcpJsonConfig(configPath, mcpServerPath, config.configKey);
-        console.log(`  MCP config written to: ${configPath}`);
+        process.stdout.write(`  MCP config written to: ${configPath}\n`);
       }
 
       // Inject context if configured
@@ -122,7 +126,7 @@ function installMcpIntegration(config: McpInstallerConfig): () => Promise<number
       if (config.contextFile) {
         contextPath = config.contextFile.path;
         injectContextIntoMarkdownFile(contextPath, PLACEHOLDER_CONTEXT);
-        console.log(`  Context placeholder written to: ${contextPath}`);
+        process.stdout.write(`  Context placeholder written to: ${contextPath}\n`);
       }
 
       // Print summary
@@ -142,11 +146,15 @@ function installMcpIntegration(config: McpInstallerConfig): () => Promise<number
       summaryLines.push('  1. Start claude-mem worker: npx claude-mem start');
       summaryLines.push(`  2. Restart ${config.ideLabel} to pick up the MCP server`);
       summaryLines.push('');
-      console.log(summaryLines.join('\n'));
+      process.stdout.write(`${summaryLines.join('\n')}\n`);
 
       return 0;
     } catch (error) {
-      console.error(`\nInstallation failed: ${(error as Error).message}`);
+      logger.error('SYSTEM', 'MCP integration install failed', {
+        ideId: config.ideId,
+        error: (error as Error).message,
+      });
+      process.stderr.write(`\nInstallation failed: ${(error as Error).message}\n`);
       return 1;
     }
   };
@@ -265,12 +273,13 @@ function buildGooseClaudeMemEntryYaml(mcpServerPath: string): string {
  * @returns 0 on success, 1 on failure
  */
 export async function installGooseMcpIntegration(): Promise<number> {
-  console.log('\nInstalling Claude-Mem MCP integration for Goose...\n');
+  process.stdout.write('\nInstalling Claude-Mem MCP integration for Goose...\n\n');
 
   const mcpServerPath = findMcpServerPath();
   if (!mcpServerPath) {
-    console.error('Could not find MCP server script');
-    console.error('   Expected at: ~/.claude/plugins/marketplaces/thedotmack/plugin/scripts/mcp-server.cjs');
+    logger.error('SYSTEM', 'Goose MCP integration install failed because the MCP server script was not found');
+    process.stderr.write('Could not find MCP server script\n');
+    process.stderr.write('   Expected at: ~/.claude/plugins/marketplaces/thedotmack/plugin/scripts/mcp-server.cjs\n');
     return 1;
   }
 
@@ -292,7 +301,7 @@ export async function installGooseMcpIntegration(): Promise<number> {
           yamlContent = yamlContent.replace(claudeMemPattern, newEntry);
         }
         writeFileSync(configPath, yamlContent);
-        console.log(`  Updated existing claude-mem entry in: ${configPath}`);
+        process.stdout.write(`  Updated existing claude-mem entry in: ${configPath}\n`);
       } else if (yamlContent.includes('mcpServers:')) {
         // mcpServers section exists but no claude-mem entry — append under it
         const mcpServersIndex = yamlContent.indexOf('mcpServers:');
@@ -305,22 +314,22 @@ export async function installGooseMcpIntegration(): Promise<number> {
           yamlContent.slice(insertionPoint);
 
         writeFileSync(configPath, yamlContent);
-        console.log(`  Added claude-mem to existing mcpServers in: ${configPath}`);
+        process.stdout.write(`  Added claude-mem to existing mcpServers in: ${configPath}\n`);
       } else {
         // No mcpServers section — append the entire block
         const mcpBlock = '\n' + buildGooseMcpYamlBlock(mcpServerPath) + '\n';
         yamlContent = yamlContent.trimEnd() + '\n' + mcpBlock;
         writeFileSync(configPath, yamlContent);
-        console.log(`  Appended mcpServers section to: ${configPath}`);
+        process.stdout.write(`  Appended mcpServers section to: ${configPath}\n`);
       }
     } else {
       // File doesn't exist — create from template
       const templateContent = buildGooseMcpYamlBlock(mcpServerPath) + '\n';
       writeFileSync(configPath, templateContent);
-      console.log(`  Created config with MCP server: ${configPath}`);
+      process.stdout.write(`  Created config with MCP server: ${configPath}\n`);
     }
 
-    console.log(`
+    process.stdout.write(`
 Installation complete!
 
 MCP config:  ${configPath}
@@ -335,7 +344,10 @@ Next steps:
 
     return 0;
   } catch (error) {
-    console.error(`\nInstallation failed: ${(error as Error).message}`);
+    logger.error('SYSTEM', 'Goose MCP integration install failed', {
+      error: (error as Error).message,
+    });
+    process.stderr.write(`\nInstallation failed: ${(error as Error).message}\n`);
     return 1;
   }
 }

@@ -329,6 +329,47 @@ export function ContextSettingsModal({
               </div>
             </CollapsibleSection>
 
+            <CollapsibleSection
+              title="Memory Assist"
+              description="Selective recall for prompts and file reads"
+              defaultOpen={false}
+            >
+              <div className="toggle-group">
+                <ToggleSwitch
+                  id="semantic-inject"
+                  label="Semantic prompt assist"
+                  description="Inject only high-confidence past observations into prompts."
+                  checked={formState.CLAUDE_MEM_SEMANTIC_INJECT === 'true'}
+                  onChange={() => toggleBoolean('CLAUDE_MEM_SEMANTIC_INJECT')}
+                />
+              </div>
+              <FormField
+                label="Semantic matches"
+                tooltip="Maximum number of memories to inject when semantic prompt assist is enabled (1-20)"
+              >
+                <input
+                  type="number"
+                  min="1"
+                  max="20"
+                  value={formState.CLAUDE_MEM_SEMANTIC_INJECT_LIMIT || '5'}
+                  onChange={(e) => updateSetting('CLAUDE_MEM_SEMANTIC_INJECT_LIMIT', e.target.value)}
+                />
+              </FormField>
+              <FormField
+                label="Max semantic distance"
+                tooltip="Lower is stricter. Only matches at or below this Chroma distance are injected."
+              >
+                <input
+                  type="number"
+                  min="0"
+                  max="2"
+                  step="0.01"
+                  value={formState.CLAUDE_MEM_SEMANTIC_INJECT_THRESHOLD || '0.35'}
+                  onChange={(e) => updateSetting('CLAUDE_MEM_SEMANTIC_INJECT_THRESHOLD', e.target.value)}
+                />
+              </FormField>
+            </CollapsibleSection>
+
             {/* Section 4: Advanced */}
             <CollapsibleSection
               title="Advanced"

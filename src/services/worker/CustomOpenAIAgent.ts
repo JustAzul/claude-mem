@@ -26,8 +26,10 @@ import {
   processAgentResponse,
   shouldFallbackToClaude,
   type FallbackAgent,
+  type ToolContext,
   type WorkerRef
 } from './agents/index.js';
+import { toSnapshotString, type CaptureSnapshotSource } from '../sqlite/observations/capture-snapshot.js';
 
 const DEFAULT_MAX_CONTEXT_MESSAGES = 20;
 const DEFAULT_MAX_ESTIMATED_TOKENS = 100000;
@@ -142,6 +144,9 @@ export class CustomOpenAIAgent {
             tool_output: JSON.stringify(message.tool_response),
             created_at_epoch: originalTimestamp ?? Date.now(),
             cwd: message.cwd
+          }, {
+            userRequest: session.userPrompt ?? null,
+            priorAssistantMessage: message.last_assistant_message ?? null,
           });
 
           session.conversationHistory.push({ role: 'user', content: obsPrompt });
@@ -154,6 +159,21 @@ export class CustomOpenAIAgent {
             session.cumulativeOutputTokens += Math.floor(tokensUsed * 0.3);
           }
 
+          const toolContext: ToolContext = {
+            tool_name: message.tool_name!,
+            tool_input: message.tool_input,
+          };
+          const captureSource: CaptureSnapshotSource = {
+            memorySessionId: session.memorySessionId,
+            contentSessionId: session.contentSessionId,
+            promptNumber: session.lastPromptNumber,
+            userPrompt: session.userPrompt ?? null,
+            priorAssistantMessage: message.last_assistant_message ?? null,
+            toolName: message.tool_name ?? null,
+            toolInput: toSnapshotString(message.tool_input),
+            toolOutput: toSnapshotString(message.tool_response),
+            cwd: message.cwd ?? null,
+          };
           await processAgentResponse(
             obsResponse.content || '',
             session,
@@ -164,7 +184,9 @@ export class CustomOpenAIAgent {
             originalTimestamp,
             'CustomOpenAI',
             lastCwd,
-            model
+            model,
+            toolContext,
+            captureSource
           );
 
         } else if (message.type === 'summarize') {

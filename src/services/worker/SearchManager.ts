@@ -137,9 +137,44 @@ export class SearchManager {
     const searchSessions = !type || type === 'sessions';
     const searchPrompts = !type || type === 'prompts';
 
+    // PATH 0: Explicit strategyHint for new strategies (multi_signal / fts) — delegate
+    // to the orchestrator so Phase 1 multi-signal retrieval is reachable from callers
+    // that opt in. Default path (no hint) still uses the legacy Chroma-only pipeline
+    // below; see ChromaSearchStrategy.filterByRecency follow-up for the reason the
+    // orchestrator's default auto-routing is not yet used here.
+    const strategyHint = (options as any).strategyHint;
+    if (query && (strategyHint === 'multi_signal' || strategyHint === 'fts')) {
+      const searchType =
+        searchObservations && !searchSessions && !searchPrompts ? 'observations' :
+        searchSessions && !searchObservations && !searchPrompts ? 'sessions' :
+        searchPrompts && !searchObservations && !searchSessions ? 'prompts' :
+        'all';
+
+      const orchResult = await this.orchestrator.search({
+        ...options,
+        query,
+        searchType,
+        obsType: obs_type,
+        concepts,
+        files,
+      });
+
+      observations = orchResult.results.observations;
+      sessions = orchResult.results.sessions;
+      prompts = orchResult.results.prompts;
+
+      logger.debug('SEARCH', 'Orchestrator served query via strategyHint', {
+        hint: strategyHint,
+        strategy: orchResult.strategy,
+        usedChroma: orchResult.usedChroma,
+        usedFTS: orchResult.usedFTS,
+        fellBack: orchResult.fellBack,
+        observations: observations.length,
+      });
+    }
     // PATH 1: FILTER-ONLY (no query text) - Skip Chroma/FTS5, use direct SQLite filtering
     // This path enables date filtering which Chroma cannot do (requires direct SQLite access)
-    if (!query) {
+    else if (!query) {
       logger.debug('SEARCH', 'Filter-only query (no query text), using direct SQLite filtering', { enablesDateFilters: true });
       const obsOptions = { ...options, type: obs_type, concepts, files };
       if (searchObservations) {

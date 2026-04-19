@@ -39,6 +39,13 @@ export const DEFAULT_SETTINGS = {
   // Feature Toggles
   CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY: 'true',
   CLAUDE_MEM_CONTEXT_SHOW_LAST_MESSAGE: 'false',
+  CLAUDE_MEM_SEMANTIC_INJECT: 'false',
+  CLAUDE_MEM_SEMANTIC_INJECT_LIMIT: '5',
+  CLAUDE_MEM_SEMANTIC_INJECT_THRESHOLD: '0.35',
+
+  // Calibration recommender — paused by default until Probe B ships a
+  // validated content-reuse signal. Keep in sync with SettingsDefaultsManager.
+  CLAUDE_MEM_RECOMMENDER_PAUSED: 'true',
 
   // Exclusion Settings
   CLAUDE_MEM_EXCLUDED_PROJECTS: '',

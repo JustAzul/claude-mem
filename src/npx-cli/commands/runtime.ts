@@ -13,14 +13,22 @@ import pc from 'picocolors';
 import { resolveBunBinaryPath } from '../utils/bun-resolver.js';
 import { isPluginInstalled, marketplaceDirectory } from '../utils/paths.js';
 
+function writeStdout(message: string): void {
+  process.stdout.write(`${message}\n`);
+}
+
+function writeStderr(message: string): void {
+  process.stderr.write(`${message}\n`);
+}
+
 // ---------------------------------------------------------------------------
 // Installation guard
 // ---------------------------------------------------------------------------
 
 function ensureInstalledOrExit(): void {
   if (!isPluginInstalled()) {
-    console.error(pc.red('claude-mem is not installed.'));
-    console.error(`Run: ${pc.bold('npx claude-mem install')}`);
+    writeStderr(pc.red('claude-mem is not installed.'));
+    writeStderr(`Run: ${pc.bold('npx claude-mem install')}`);
     process.exit(1);
   }
 }
@@ -32,9 +40,9 @@ function ensureInstalledOrExit(): void {
 function resolveBunOrExit(): string {
   const bunPath = resolveBunBinaryPath();
   if (!bunPath) {
-    console.error(pc.red('Bun not found.'));
-    console.error('Install Bun: https://bun.sh');
-    console.error('After installation, restart your terminal.');
+    writeStderr(pc.red('Bun not found.'));
+    writeStderr('Install Bun: https://bun.sh');
+    writeStderr('After installation, restart your terminal.');
     process.exit(1);
   }
   return bunPath;
@@ -58,8 +66,8 @@ function spawnBunWorkerCommand(command: string, extraArgs: string[] = []): void 
   const workerScript = workerServiceScriptPath();
 
   if (!existsSync(workerScript)) {
-    console.error(pc.red(`Worker script not found at: ${workerScript}`));
-    console.error('The installation may be corrupted. Try: npx claude-mem install');
+    writeStderr(pc.red(`Worker script not found at: ${workerScript}`));
+    writeStderr('The installation may be corrupted. Try: npx claude-mem install');
     process.exit(1);
   }
 
@@ -72,7 +80,7 @@ function spawnBunWorkerCommand(command: string, extraArgs: string[] = []): void 
   });
 
   child.on('error', (error) => {
-    console.error(pc.red(`Failed to start Bun: ${error.message}`));
+    writeStderr(pc.red(`Failed to start Bun: ${error.message}`));
     process.exit(1);
   });
 
@@ -109,7 +117,7 @@ export async function runSearchCommand(queryParts: string[]): Promise<void> {
 
   const query = queryParts.join(' ').trim();
   if (!query) {
-    console.error(pc.red('Usage: npx claude-mem search <query>'));
+    writeStderr(pc.red('Usage: npx claude-mem search <query>'));
     process.exit(1);
   }
 
@@ -121,28 +129,28 @@ export async function runSearchCommand(queryParts: string[]): Promise<void> {
 
     if (!response.ok) {
       if (response.status === 404) {
-        console.error(pc.red('Search endpoint not found. Is the worker running?'));
-        console.error(`Try: ${pc.bold('npx claude-mem start')}`);
+        writeStderr(pc.red('Search endpoint not found. Is the worker running?'));
+        writeStderr(`Try: ${pc.bold('npx claude-mem start')}`);
         process.exit(1);
       }
-      console.error(pc.red(`Search failed: HTTP ${response.status}`));
+      writeStderr(pc.red(`Search failed: HTTP ${response.status}`));
       process.exit(1);
     }
 
     const data = await response.json();
 
     if (typeof data === 'object' && data !== null) {
-      console.log(JSON.stringify(data, null, 2));
+      writeStdout(JSON.stringify(data, null, 2));
     } else {
-      console.log(data);
+      writeStdout(String(data));
     }
   } catch (error: any) {
     if (error?.cause?.code === 'ECONNREFUSED' || error?.message?.includes('ECONNREFUSED')) {
-      console.error(pc.red('Worker is not running.'));
-      console.error(`Start it with: ${pc.bold('npx claude-mem start')}`);
+      writeStderr(pc.red('Worker is not running.'));
+      writeStderr(`Start it with: ${pc.bold('npx claude-mem start')}`);
       process.exit(1);
     }
-    console.error(pc.red(`Search failed: ${error.message}`));
+    writeStderr(pc.red(`Search failed: ${error.message}`));
     process.exit(1);
   }
 }
@@ -174,7 +182,7 @@ export function runTranscriptWatchCommand(): void {
   });
 
   child.on('error', (error) => {
-    console.error(pc.red(`Failed to start transcript watcher: ${error.message}`));
+    writeStderr(pc.red(`Failed to start transcript watcher: ${error.message}`));
     process.exit(1);
   });
 

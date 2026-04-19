@@ -8,13 +8,15 @@
 import type { EventHandler, NormalizedHookInput, HookResult } from '../types.js';
 import { ensureWorkerRunning, workerHttpRequest } from '../../shared/worker-utils.js';
 import { logger } from '../../utils/logger.js';
-import { parseJsonArray } from '../../shared/timeline-formatting.js';
+import { estimateTokens, parseJsonArray } from '../../shared/timeline-formatting.js';
 import { statSync } from 'fs';
 import path from 'path';
 import { isProjectExcluded } from '../../utils/project-filter.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
 import { USER_SETTINGS_PATH } from '../../shared/paths.js';
 import { getProjectContext } from '../../utils/project-name.js';
+import { normalizePlatformSource } from '../../shared/platform-source.js';
+import { reportMemoryAssist } from './memory-assist-report.js';
 
 /** Skip the gate for files smaller than this — timeline overhead exceeds file read cost. */
 const FILE_READ_GATE_MIN_BYTES = 1_500;
@@ -173,8 +175,18 @@ export const fileContextHandler: EventHandler = {
     // Extract file_path from toolInput
     const toolInput = input.toolInput as Record<string, unknown> | undefined;
     const filePath = toolInput?.file_path as string | undefined;
+    const project = getProjectContext(input.cwd).primary;
+    const platformSource = normalizePlatformSource(input.platform);
 
     if (!filePath) {
+      await reportMemoryAssist({
+        source: 'file_context',
+        status: 'skipped',
+        reason: 'missing_file_path',
+        project,
+        contentSessionId: input.sessionId,
+        platformSource,
+      });
       return { continue: true, suppressOutput: true };
     }
 
@@ -196,6 +208,15 @@ export const fileContextHandler: EventHandler = {
       // Skip gate for files below the token-economics threshold — timeline (~370 tokens)
       // costs more than reading small files directly.
       if (stat.size < FILE_READ_GATE_MIN_BYTES) {
+        await reportMemoryAssist({
+          source: 'file_context',
+          status: 'skipped',
+          reason: 'file_too_small',
+          project,
+          contentSessionId: input.sessionId,
+          platformSource,
+          filePath,
+        });
         return { continue: true, suppressOutput: true };
       }
       fileMtimeMs = stat.mtimeMs;
@@ -208,12 +229,30 @@ export const fileContextHandler: EventHandler = {
     const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
     if (input.cwd && isProjectExcluded(input.cwd, settings.CLAUDE_MEM_EXCLUDED_PROJECTS)) {
       logger.debug('HOOK', 'Project excluded from tracking, skipping file context', { cwd: input.cwd });
+      await reportMemoryAssist({
+        source: 'file_context',
+        status: 'skipped',
+        reason: 'project_excluded',
+        project,
+        contentSessionId: input.sessionId,
+        platformSource,
+        filePath,
+      });
       return { continue: true, suppressOutput: true };
     }
 
     // Ensure worker is running
     const workerReady = await ensureWorkerRunning();
     if (!workerReady) {
+      await reportMemoryAssist({
+        source: 'file_context',
+        status: 'skipped',
+        reason: 'worker_unavailable',
+        project,
+        contentSessionId: input.sessionId,
+        platformSource,
+        filePath,
+      });
       return { continue: true, suppressOutput: true };
     }
 
@@ -237,12 +276,32 @@ export const fileContextHandler: EventHandler = {
 
       if (!response.ok) {
         logger.warn('HOOK', 'File context query failed, skipping', { status: response.status, filePath });
+        await reportMemoryAssist({
+          source: 'file_context',
+          status: 'error',
+          reason: 'file_context_query_failed',
+          project,
+          contentSessionId: input.sessionId,
+          platformSource,
+          filePath: relativePath,
+          message: `status:${response.status}`,
+        });
         return { continue: true, suppressOutput: true };
       }
 
       const data = await response.json() as { observations: ObservationRow[]; count: number };
 
       if (!data.observations || data.observations.length === 0) {
+        await reportMemoryAssist({
+          source: 'file_context',
+          status: 'skipped',
+          reason: 'no_observations',
+          project,
+          contentSessionId: input.sessionId,
+          platformSource,
+          filePath: relativePath,
+          candidateCount: 0,
+        });
         return { continue: true, suppressOutput: true };
       }
 
@@ -256,6 +315,16 @@ export const fileContextHandler: EventHandler = {
             fileMtimeMs,
             newestObservationMs,
           });
+          await reportMemoryAssist({
+            source: 'file_context',
+            status: 'skipped',
+            reason: 'file_newer_than_memory',
+            project,
+            contentSessionId: input.sessionId,
+            platformSource,
+            filePath: relativePath,
+            candidateCount: data.observations.length,
+          });
           return { continue: true, suppressOutput: true };
         }
       }
@@ -263,6 +332,17 @@ export const fileContextHandler: EventHandler = {
       // Deduplicate: one per session, ranked by specificity to this file
       const dedupedObservations = deduplicateObservations(data.observations, relativePath, DISPLAY_LIMIT);
       if (dedupedObservations.length === 0) {
+        await reportMemoryAssist({
+          source: 'file_context',
+          status: 'skipped',
+          reason: 'no_displayable_observations',
+          project,
+          contentSessionId: input.sessionId,
+          platformSource,
+          filePath: relativePath,
+          candidateCount: data.observations.length,
+          selectedCount: 0,
+        });
         return { continue: true, suppressOutput: true };
       }
 
@@ -277,6 +357,26 @@ export const fileContextHandler: EventHandler = {
         updatedInput.limit = 1;
       }
 
+      await reportMemoryAssist({
+        source: 'file_context',
+        status: 'injected',
+        reason: truncated ? 'timeline_truncated_read' : 'timeline_injected',
+        project,
+        contentSessionId: input.sessionId,
+        platformSource,
+        filePath: relativePath,
+        candidateCount: data.observations.length,
+        selectedCount: dedupedObservations.length,
+        estimatedInjectedTokens: estimateTokens(timeline),
+        traceItems: dedupedObservations.slice(0, 8).map((observation) => ({
+          observationId: observation.id,
+          title: observation.title,
+          type: observation.type,
+          createdAtEpoch: observation.created_at_epoch,
+          filePath: relativePath,
+        })),
+      });
+
       return {
         hookSpecificOutput: {
           hookEventName: 'PreToolUse',
@@ -288,6 +388,16 @@ export const fileContextHandler: EventHandler = {
     } catch (error) {
       logger.warn('HOOK', 'File context fetch error, skipping', {
         error: error instanceof Error ? error.message : String(error),
+      });
+      await reportMemoryAssist({
+        source: 'file_context',
+        status: 'error',
+        reason: 'file_context_fetch_error',
+        project,
+        contentSessionId: input.sessionId,
+        platformSource,
+        filePath,
+        message: error instanceof Error ? error.message : String(error),
       });
       return { continue: true, suppressOutput: true };
     }

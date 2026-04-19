@@ -74,6 +74,10 @@ export interface ObservationRecord {
   source_files?: string;
   prompt_number?: number;
   discovery_tokens?: number;
+  why?: string | null;
+  alternatives_rejected?: string | null;
+  related_observation_ids?: string | null; // JSON stringified array e.g. "[9783,9784]"
+  via?: 'direct' | 'cross_ref'; // populated by getObservationsByFilePath cross-ref hop
 }
 
 /**

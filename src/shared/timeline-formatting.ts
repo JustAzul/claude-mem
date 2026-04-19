@@ -6,6 +6,7 @@
  */
 
 import path from 'path';
+import type { MemoryAssistTraceItem } from './memory-assist.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -108,6 +109,45 @@ export function extractFirstFile(
 export function estimateTokens(text: string | null): number {
   if (!text) return 0;
   return Math.ceil(text.length / 4);
+}
+
+/**
+ * Approximate the injected file-memory timeline cost from persisted trace items.
+ *
+ * This is intentionally conservative and is used mainly for backfilling older
+ * file-context decisions that predate explicit estimatedInjectedTokens storage.
+ */
+export function estimateTimelineTokensFromTraceItems(
+  traceItems: MemoryAssistTraceItem[] | null | undefined,
+  filePath?: string | null
+): number {
+  if (!traceItems?.length) return 0;
+
+  const dayBuckets = new Set(
+    traceItems
+      .map((item) => (item.createdAtEpoch ? formatDate(item.createdAtEpoch) : null))
+      .filter((value): value is string => Boolean(value))
+  );
+
+  const header = [
+    `This file has prior observations. ${filePath ? `File: ${path.basename(filePath)}.` : ''}`.trim(),
+    '- Already know enough? The timeline below may be all you need.',
+    '- Need details? get_observations([IDs]).',
+  ];
+
+  const rows = traceItems.map((item) => {
+    const datePrefix = item.createdAtEpoch ? formatTime(item.createdAtEpoch) : '';
+    const title = (item.title || 'Untitled').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+    return `${item.observationId} ${datePrefix} ${item.type ?? 'discovery'} ${title}`.trim();
+  });
+
+  const approxText = [
+    ...header,
+    ...Array.from(dayBuckets).map((day) => `### ${day}`),
+    ...rows,
+  ].join('\n');
+
+  return estimateTokens(approxText);
 }
 
 /**

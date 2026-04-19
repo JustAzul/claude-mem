@@ -25,8 +25,10 @@ import {
   processAgentResponse,
   shouldFallbackToClaude,
   type FallbackAgent,
+  type ToolContext,
   type WorkerRef
 } from './agents/index.js';
+import { toSnapshotString, type CaptureSnapshotSource } from '../sqlite/observations/capture-snapshot.js';
 
 // OpenRouter API endpoint
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
@@ -177,6 +179,9 @@ export class OpenRouterAgent {
             tool_output: JSON.stringify(message.tool_response),
             created_at_epoch: originalTimestamp ?? Date.now(),
             cwd: message.cwd
+          }, {
+            userRequest: session.userPrompt ?? null,
+            priorAssistantMessage: message.last_assistant_message ?? null,
           });
 
           // Add to conversation history and query OpenRouter with full context
@@ -194,6 +199,21 @@ export class OpenRouterAgent {
           }
 
           // Process response using shared ResponseProcessor
+          const toolContext: ToolContext = {
+            tool_name: message.tool_name!,
+            tool_input: message.tool_input,
+          };
+          const captureSource: CaptureSnapshotSource = {
+            memorySessionId: session.memorySessionId,
+            contentSessionId: session.contentSessionId,
+            promptNumber: session.lastPromptNumber,
+            userPrompt: session.userPrompt ?? null,
+            priorAssistantMessage: message.last_assistant_message ?? null,
+            toolName: message.tool_name ?? null,
+            toolInput: toSnapshotString(message.tool_input),
+            toolOutput: toSnapshotString(message.tool_response),
+            cwd: message.cwd ?? null,
+          };
           await processAgentResponse(
             obsResponse.content || '',
             session,
@@ -204,7 +224,9 @@ export class OpenRouterAgent {
             originalTimestamp,
             'OpenRouter',
             lastCwd,
-            model
+            model,
+            toolContext,
+            captureSource
           );
 
         } else if (message.type === 'summarize') {

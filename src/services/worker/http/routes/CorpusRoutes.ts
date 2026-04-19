@@ -11,6 +11,7 @@ import { CorpusStore } from '../../knowledge/CorpusStore.js';
 import { CorpusBuilder } from '../../knowledge/CorpusBuilder.js';
 import { KnowledgeAgent } from '../../knowledge/KnowledgeAgent.js';
 import type { CorpusFilter } from '../../knowledge/types.js';
+import { logger } from '../../../../utils/logger.js';
 
 const ALLOWED_CORPUS_TYPES = new Set(['decision', 'bugfix', 'feature', 'refactor', 'discovery', 'change']);
 
@@ -77,6 +78,7 @@ export class CorpusRoutes extends BaseRouteHandler {
     if (date_end) filter.date_end = date_end;
     if (coercedLimit !== undefined) filter.limit = coercedLimit;
 
+    logger.debug(`[CorpusRoutes] building corpus "${name}" with filter keys: ${Object.keys(filter).join(', ') || 'none'}`);
     const corpus = await this.corpusBuilder.build(name, description || '', filter);
 
     // Return stats without the full observations array

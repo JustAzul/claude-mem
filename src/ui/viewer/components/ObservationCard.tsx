@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Observation } from '../types';
 import { formatDate } from '../utils/formatters';
+import { useTraceUrlParam } from '../hooks/useTraceUrlParam';
 
 interface ObservationCardProps {
   observation: Observation;
@@ -25,14 +26,16 @@ function stripProjectRoot(filePath: string): string {
     return filePath.substring(projectIndex + 'claude-mem/'.length);
   }
 
-  // If no markers found, return basename or original path
-  const parts = filePath.split('/');
-  return parts.length > 3 ? parts.slice(-3).join('/') : filePath;
+  // No recognised marker: return the original path unchanged.
+  // The previous "last 3 segments" fallback produced misleading output for
+  // paths that share no project structure (e.g. desktop exports, temp files).
+  return filePath;
 }
 
 export function ObservationCard({ observation }: ObservationCardProps) {
   const [showFacts, setShowFacts] = useState(false);
   const [showNarrative, setShowNarrative] = useState(false);
+  const [, setTraceId] = useTraceUrlParam();
   const date = formatDate(observation.created_at_epoch);
 
   // Parse JSON fields
@@ -94,7 +97,17 @@ export function ObservationCard({ observation }: ObservationCardProps) {
       </div>
 
       {/* Title */}
-      <div className="card-title">{observation.title || 'Untitled'}</div>
+      <div
+        className="card-title"
+        onClick={() => setTraceId(observation.id)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setTraceId(observation.id); } }}
+        style={{ cursor: 'pointer' }}
+        title="Click to see full trace for debugging"
+      >
+        {observation.title || 'Untitled'}
+      </div>
 
       {/* Content based on toggle state */}
       <div className="view-mode-content">

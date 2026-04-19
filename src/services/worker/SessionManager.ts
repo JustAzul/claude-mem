@@ -261,7 +261,7 @@ export class SessionManager {
    * CRITICAL: Persists to database FIRST before adding to in-memory queue.
    * This ensures observations survive worker crashes.
    */
-  queueObservation(sessionDbId: number, data: ObservationData): void {
+  queueObservation(sessionDbId: number, data: ObservationData): number {
     // Auto-initialize from database if needed (handles worker restarts)
     let session = this.sessions.get(sessionDbId);
     if (!session) {
@@ -275,11 +275,13 @@ export class SessionManager {
       tool_input: data.tool_input,
       tool_response: data.tool_response,
       prompt_number: data.prompt_number,
-      cwd: data.cwd
+      cwd: data.cwd,
+      last_assistant_message: data.last_assistant_message
     };
 
+    let messageId: number;
     try {
-      const messageId = this.getPendingStore().enqueue(sessionDbId, session.contentSessionId, message);
+      messageId = this.getPendingStore().enqueue(sessionDbId, session.contentSessionId, message);
       const queueDepth = this.getPendingStore().getPendingCount(sessionDbId);
       const toolSummary = logger.formatTool(data.tool_name, data.tool_input);
       logger.info('QUEUE', `ENQUEUED | sessionDbId=${sessionDbId} | messageId=${messageId} | type=observation | tool=${toolSummary} | depth=${queueDepth}`, {
@@ -296,6 +298,7 @@ export class SessionManager {
     // Notify generator immediately (zero latency)
     const emitter = this.sessionQueues.get(sessionDbId);
     emitter?.emit('message');
+    return messageId;
   }
 
   /**

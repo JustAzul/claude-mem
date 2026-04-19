@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { Observation, Summary, UserPrompt, StreamEvent, ProjectCatalog } from '../types';
+import type { MemoryAssistEvent } from '../../../shared/memory-assist';
 import { API_ENDPOINTS } from '../constants/api';
 import { TIMING } from '../constants/timing';
 
@@ -12,6 +13,7 @@ export function useSSE() {
     sources: [],
     projectsBySource: {}
   });
+  const [memoryAssistEvents, setMemoryAssistEvents] = useState<MemoryAssistEvent[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [queueDepth, setQueueDepth] = useState(0);
@@ -84,6 +86,7 @@ export function useSSE() {
               sources: data.sources || [],
               projectsBySource: data.projectsBySource || {}
             });
+            setMemoryAssistEvents(data.memoryAssistEvents || []);
             break;
 
           case 'new_observation':
@@ -117,6 +120,13 @@ export function useSSE() {
               setQueueDepth(data.queueDepth || 0);
             }
             break;
+
+          case 'memory_assist_status':
+            if (data.memoryAssist) {
+              console.log('[SSE] Memory assist:', data.memoryAssist.status, data.memoryAssist.reason);
+              setMemoryAssistEvents(prev => [data.memoryAssist!, ...prev].slice(0, 50));
+            }
+            break;
         }
       };
     };
@@ -140,6 +150,7 @@ export function useSSE() {
     projects: catalog.projects,
     sources: catalog.sources,
     projectsBySource: catalog.projectsBySource,
+    memoryAssistEvents,
     isProcessing,
     queueDepth,
     isConnected

@@ -9,10 +9,16 @@ import express, { Request, Response } from 'express';
 import { SearchManager } from '../../SearchManager.js';
 import { BaseRouteHandler } from '../BaseRouteHandler.js';
 import { logger } from '../../../../utils/logger.js';
+import { PromptSemanticAssistService } from '../../context/PromptSemanticAssistService.js';
+import { MemoryAssistTracker } from '../../MemoryAssistTracker.js';
+import { DatabaseManager } from '../../DatabaseManager.js';
 
 export class SearchRoutes extends BaseRouteHandler {
   constructor(
-    private searchManager: SearchManager
+    private searchManager: SearchManager,
+    private semanticAssistService: PromptSemanticAssistService,
+    private memoryAssistTracker: MemoryAssistTracker,
+    private dbManager: DatabaseManager
   ) {
     super();
   }
@@ -263,41 +269,34 @@ export class SearchRoutes extends BaseRouteHandler {
     const query = (req.body?.q || req.query.q) as string;
     const project = (req.body?.project || req.query.project) as string;
     const limit = Math.min(Math.max(parseInt(String(req.body?.limit || req.query.limit || '5'), 10) || 5, 1), 20);
+    const threshold = parseFloat(String(req.body?.threshold || req.query.threshold || '0.35'));
+    const promptNumber = req.body?.promptNumber ? parseInt(String(req.body.promptNumber), 10) : undefined;
+    const sessionDbId = req.body?.sessionDbId ? parseInt(String(req.body.sessionDbId), 10) : undefined;
+    const contentSessionId = (req.body?.contentSessionId || req.query.contentSessionId) as string | undefined;
+    const platformSource = (req.body?.platformSource || req.query.platformSource) as string | undefined;
 
-    if (!query || query.length < 20) {
-      res.json({ context: '', count: 0 });
-      return;
-    }
+    const result = await this.semanticAssistService.evaluate({
+      query,
+      project,
+      limit,
+      threshold,
+      promptNumber: Number.isFinite(promptNumber) ? promptNumber : undefined,
+      sessionDbId: Number.isFinite(sessionDbId) ? sessionDbId : undefined,
+      contentSessionId,
+      platformSource,
+    });
 
-    try {
-      const result = await this.searchManager.search({
-        query,
-        type: 'observations',
+    if (result.decision.status === 'error') {
+      logger.error('SEARCH', 'Semantic context query failed', {
+        reason: result.decision.reason,
         project,
-        limit: String(limit),
-        format: 'json'
-      });
-
-      const observations = (result as any)?.observations || [];
-      if (!observations.length) {
-        res.json({ context: '', count: 0 });
-        return;
-      }
-
-      // Format as compact markdown for context injection
-      const lines: string[] = ['## Relevant Past Work (semantic match)\n'];
-      for (const obs of observations.slice(0, limit)) {
-        const date = obs.created_at?.slice(0, 10) || '';
-        lines.push(`### ${obs.title || 'Observation'} (${date})`);
-        if (obs.narrative) lines.push(obs.narrative);
-        lines.push('');
-      }
-
-      res.json({ context: lines.join('\n'), count: observations.length });
-    } catch (error) {
-      logger.error('SEARCH', 'Semantic context query failed', {}, error as Error);
-      res.json({ context: '', count: 0 });
+        sessionDbId,
+      }, result.decision.message ? new Error(result.decision.message) : undefined);
     }
+
+    const persistedDecision = this.dbManager.getSessionStore().recordMemoryAssistDecision(result.decision);
+    this.memoryAssistTracker.record(persistedDecision);
+    res.json({ context: result.context, count: result.count, decision: persistedDecision });
   });
 
   /**

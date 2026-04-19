@@ -29,8 +29,15 @@ let loggerSpies: ReturnType<typeof spyOn>[] = [];
 
 describe('Hook Execution E2E', () => {
   let server: Server;
-  let testPort: number;
   let mockOptions: ServerOptions;
+
+  const getBoundPort = (): number => {
+    const address = server.getHttpServer()?.address();
+    if (!address || typeof address === 'string') {
+      throw new Error('Test server did not expose a TCP port');
+    }
+    return address.port;
+  };
 
   beforeEach(() => {
     loggerSpies = [
@@ -52,8 +59,6 @@ describe('Hook Execution E2E', () => {
         lastInteraction: null,
       }),
     };
-
-    testPort = 40000 + Math.floor(Math.random() * 10000);
   });
 
   afterEach(async () => {
@@ -72,7 +77,8 @@ describe('Hook Execution E2E', () => {
   describe('health and readiness endpoints', () => {
     it('should return 200 with status ok from /api/health', async () => {
       server = new Server(mockOptions);
-      await server.listen(testPort, '127.0.0.1');
+      await server.listen(0, '127.0.0.1');
+      const testPort = getBoundPort();
 
       const response = await fetch(`http://127.0.0.1:${testPort}/api/health`);
       expect(response.status).toBe(200);
@@ -87,7 +93,8 @@ describe('Hook Execution E2E', () => {
 
     it('should return 200 with status ready from /api/readiness when initialized', async () => {
       server = new Server(mockOptions);
-      await server.listen(testPort, '127.0.0.1');
+      await server.listen(0, '127.0.0.1');
+      const testPort = getBoundPort();
 
       const response = await fetch(`http://127.0.0.1:${testPort}/api/readiness`);
       expect(response.status).toBe(200);
@@ -107,7 +114,8 @@ describe('Hook Execution E2E', () => {
       };
 
       server = new Server(uninitializedOptions);
-      await server.listen(testPort, '127.0.0.1');
+      await server.listen(0, '127.0.0.1');
+      const testPort = getBoundPort();
 
       const response = await fetch(`http://127.0.0.1:${testPort}/api/readiness`);
       expect(response.status).toBe(503);
@@ -119,7 +127,8 @@ describe('Hook Execution E2E', () => {
 
     it('should return version from /api/version', async () => {
       server = new Server(mockOptions);
-      await server.listen(testPort, '127.0.0.1');
+      await server.listen(0, '127.0.0.1');
+      const testPort = getBoundPort();
 
       const response = await fetch(`http://127.0.0.1:${testPort}/api/version`);
       expect(response.status).toBe(200);
@@ -133,7 +142,8 @@ describe('Hook Execution E2E', () => {
   describe('server lifecycle', () => {
     it('should start and stop cleanly', async () => {
       server = new Server(mockOptions);
-      await server.listen(testPort, '127.0.0.1');
+      await server.listen(0, '127.0.0.1');
+      const testPort = getBoundPort();
 
       const httpServer = server.getHttpServer();
       expect(httpServer).not.toBeNull();
@@ -170,7 +180,8 @@ describe('Hook Execution E2E', () => {
       };
 
       server = new Server(dynamicOptions);
-      await server.listen(testPort, '127.0.0.1');
+      await server.listen(0, '127.0.0.1');
+      const testPort = getBoundPort();
 
       // Check when not initialized
       let response = await fetch(`http://127.0.0.1:${testPort}/api/health`);
@@ -191,7 +202,8 @@ describe('Hook Execution E2E', () => {
     it('should return 404 for unknown routes after finalizeRoutes', async () => {
       server = new Server(mockOptions);
       server.finalizeRoutes();
-      await server.listen(testPort, '127.0.0.1');
+      await server.listen(0, '127.0.0.1');
+      const testPort = getBoundPort();
 
       const response = await fetch(`http://127.0.0.1:${testPort}/api/nonexistent`);
       expect(response.status).toBe(404);
@@ -203,7 +215,8 @@ describe('Hook Execution E2E', () => {
     it('should accept JSON content type for POST requests', async () => {
       server = new Server(mockOptions);
       server.finalizeRoutes();
-      await server.listen(testPort, '127.0.0.1');
+      await server.listen(0, '127.0.0.1');
+      const testPort = getBoundPort();
 
       // Even though this endpoint doesn't exist, verify JSON handling
       const response = await fetch(`http://127.0.0.1:${testPort}/api/test-json`, {
@@ -222,7 +235,7 @@ describe('Hook Execution E2E', () => {
       // This test simulates what the session init endpoint does
       // with private prompts, without needing the full route handler
       server = new Server(mockOptions);
-      await server.listen(testPort, '127.0.0.1');
+      await server.listen(0, '127.0.0.1');
 
       // Import tag stripping utility
       const { stripMemoryTagsFromPrompt } = await import('../../src/utils/tag-stripping.js');
@@ -238,7 +251,7 @@ describe('Hook Execution E2E', () => {
 
     it('should demonstrate partial privacy for mixed prompts', async () => {
       server = new Server(mockOptions);
-      await server.listen(testPort, '127.0.0.1');
+      await server.listen(0, '127.0.0.1');
 
       const { stripMemoryTagsFromPrompt } = await import('../../src/utils/tag-stripping.js');
 

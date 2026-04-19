@@ -7,7 +7,7 @@
  */
 
 const { execSync } = require('child_process');
-const { existsSync, readFileSync } = require('fs');
+const { existsSync, readFileSync, readdirSync, statSync } = require('fs');
 const path = require('path');
 const os = require('os');
 
@@ -86,22 +86,38 @@ try {
     { stdio: 'inherit' }
   );
 
-  // Sync to cache folder with version
+  // Sync to cache folder(s). Claude Code's plugin loader may still be pinned to
+  // a previous version directory after a version bump, so we fan out to every
+  // existing cache dir — whichever one the running worker holds open will
+  // pick up the update. The version from plugin.json is always included, even
+  // if the dir doesn't exist yet (fresh install case).
   const version = getPluginVersion();
-  const CACHE_VERSION_PATH = path.join(CACHE_BASE_PATH, version);
+  const cacheTargets = new Set([version]);
+  if (existsSync(CACHE_BASE_PATH)) {
+    for (const entry of readdirSync(CACHE_BASE_PATH)) {
+      const full = path.join(CACHE_BASE_PATH, entry);
+      try {
+        if (statSync(full).isDirectory()) cacheTargets.add(entry);
+      } catch {
+        // ignore unreadable entries
+      }
+    }
+  }
 
   const pluginDir = path.join(rootDir, 'plugin');
   const pluginGitignoreExcludes = getGitignoreExcludes(pluginDir);
 
-  console.log(`Syncing to cache folder (version ${version})...`);
-  execSync(
-    `rsync -av --delete --exclude=.git ${pluginGitignoreExcludes} plugin/ "${CACHE_VERSION_PATH}/"`,
-    { stdio: 'inherit' }
-  );
+  for (const target of cacheTargets) {
+    const CACHE_VERSION_PATH = path.join(CACHE_BASE_PATH, target);
+    console.log(`Syncing to cache folder (version ${target})...`);
+    execSync(
+      `rsync -av --delete --exclude=.git ${pluginGitignoreExcludes} plugin/ "${CACHE_VERSION_PATH}/"`,
+      { stdio: 'inherit' }
+    );
 
-  // Install dependencies in cache directory so worker can resolve them
-  console.log(`Running bun install in cache folder (version ${version})...`);
-  execSync(`bun install`, { cwd: CACHE_VERSION_PATH, stdio: 'inherit' });
+    console.log(`Running bun install in cache folder (version ${target})...`);
+    execSync(`bun install`, { cwd: CACHE_VERSION_PATH, stdio: 'inherit' });
+  }
 
   console.log('\x1b[32m%s\x1b[0m', 'Sync complete!');
 

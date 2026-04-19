@@ -27,6 +27,7 @@ export { FALLBACK_ERROR_PATTERNS } from './types.js';
 
 // Response Processing
 export { processAgentResponse } from './ResponseProcessor.js';
+export type { ToolContext } from './ResponseProcessor.js';
 
 // SSE Broadcasting
 export { broadcastObservation, broadcastSummary } from './ObservationBroadcaster.js';

@@ -6,6 +6,7 @@
  */
 
 import express, { Request, Response } from 'express';
+import path from 'path';
 import { getWorkerPort } from '../../../../shared/worker-utils.js';
 import { logger } from '../../../../utils/logger.js';
 import { stripMemoryTagsFromJson, stripMemoryTagsFromPrompt } from '../../../../utils/tag-stripping.js';
@@ -25,6 +26,7 @@ import { USER_SETTINGS_PATH } from '../../../../shared/paths.js';
 import { getProcessBySession, ensureProcessExit } from '../../ProcessRegistry.js';
 import { getProjectContext } from '../../../../utils/project-name.js';
 import { normalizePlatformSource } from '../../../../shared/platform-source.js';
+import { evaluateSessionWallClockGuard } from './session-wall-clock.js';
 
 export class SessionRoutes extends BaseRouteHandler {
   private completionHandler: SessionCompletionHandler;
@@ -109,6 +111,54 @@ export class SessionRoutes extends BaseRouteHandler {
   private static readonly STALE_GENERATOR_THRESHOLD_MS = 30_000; // 30 seconds (#1099)
   private static readonly MAX_SESSION_WALL_CLOCK_MS = 4 * 60 * 60 * 1000; // 4 hours (#1590)
 
+  private static readonly OUTCOME_FILE_KEYS = [
+    'file_path',
+    'notebook_path',
+    'path',
+    'target_path',
+    'target_file',
+  ];
+
+  private classifyOutcomeAction(toolName: string): 'read' | 'write' | 'edit' | 'command' | 'browser' | 'search' | 'other' {
+    if (toolName === 'Read') return 'read';
+    if (toolName === 'Edit' || toolName === 'MultiEdit') return 'edit';
+    if (toolName === 'Write' || toolName === 'NotebookEdit') return 'write';
+    if (toolName === 'Bash') return 'command';
+    if (toolName === 'WebSearch') return 'search';
+    if (toolName.toLowerCase().includes('browser')) return 'browser';
+    return 'other';
+  }
+
+  private extractOutcomeFilePaths(toolInput: Record<string, unknown> | undefined, cwd: string | undefined): string[] {
+    if (!toolInput) return [];
+    const values = new Set<string>();
+
+    for (const key of SessionRoutes.OUTCOME_FILE_KEYS) {
+      const candidate = toolInput[key];
+      if (typeof candidate === 'string' && candidate.trim()) {
+        values.add(candidate.trim());
+      }
+    }
+
+    const arrayCandidates = [toolInput.paths, toolInput.file_paths];
+    for (const candidate of arrayCandidates) {
+      if (!Array.isArray(candidate)) continue;
+      for (const entry of candidate) {
+        if (typeof entry === 'string' && entry.trim()) {
+          values.add(entry.trim());
+        }
+      }
+    }
+
+    const baseDir = typeof cwd === 'string' && cwd.trim() ? cwd : process.cwd();
+    return [...values].map((value) => {
+      if (!path.isAbsolute(value)) {
+        return value.replace(/\\/g, '/');
+      }
+      return path.relative(baseDir, value).split(path.sep).join('/');
+    });
+  }
+
   private ensureGeneratorRunning(sessionDbId: number, source: string): void {
     const session = this.sessionManager.getSession(sessionDbId);
     if (!session) return;
@@ -117,16 +167,30 @@ export class SessionRoutes extends BaseRouteHandler {
     // been alive too long to prevent runaway API costs (Issue #1590).
     // Use the persisted started_at_epoch from the DB so the guard survives worker
     // restarts (session.startTime is reset to Date.now() on every re-activation).
-    const dbSessionRecord = this.dbManager.getSessionStore().db
+    const sessionStore = this.dbManager.getSessionStore();
+    const dbSessionRecord = sessionStore.db
       .prepare('SELECT started_at_epoch FROM sdk_sessions WHERE id = ? LIMIT 1')
       .get(sessionDbId) as { started_at_epoch: number } | undefined;
     const sessionOriginMs = dbSessionRecord?.started_at_epoch ?? session.startTime;
-    const sessionAgeMs = Date.now() - sessionOriginMs;
-    if (sessionAgeMs > SessionRoutes.MAX_SESSION_WALL_CLOCK_MS) {
+    const wallClock = evaluateSessionWallClockGuard({
+      nowMs: Date.now(),
+      maxSessionWallClockMs: SessionRoutes.MAX_SESSION_WALL_CLOCK_MS,
+      sessionOriginMs,
+      latestUserPromptMs: sessionStore.getLatestUserPromptEpoch(session.contentSessionId),
+      latestPendingWorkMs: sessionStore.getLatestPendingWorkEpoch(sessionDbId)
+    });
+    if (wallClock.shouldAbort) {
       logger.warn('SESSION', 'Session exceeded wall-clock age limit — aborting to prevent runaway spend', {
         sessionId: sessionDbId,
-        ageHours: Math.round(sessionAgeMs / 3_600_000 * 10) / 10,
+        ageHours: Math.round(wallClock.sessionAgeMs / 3_600_000 * 10) / 10,
+        idleHours: Math.round(wallClock.idleAgeMs / 3_600_000 * 10) / 10,
         limitHours: SessionRoutes.MAX_SESSION_WALL_CLOCK_MS / 3_600_000,
+        latestUserPromptAgeHours: wallClock.latestUserPromptMs == null
+          ? null
+          : Math.round((Date.now() - wallClock.latestUserPromptMs) / 3_600_000 * 10) / 10,
+        latestPendingWorkAgeHours: wallClock.latestPendingWorkMs == null
+          ? null
+          : Math.round((Date.now() - wallClock.latestPendingWorkMs) / 3_600_000 * 10) / 10,
         source
       });
       if (!session.abortController.signal.aborted) {
@@ -571,10 +635,10 @@ export class SessionRoutes extends BaseRouteHandler {
   /**
    * Queue observations by contentSessionId (post-tool-use-hook uses this)
    * POST /api/sessions/observations
-   * Body: { contentSessionId, tool_name, tool_input, tool_response, cwd }
+   * Body: { contentSessionId, tool_name, tool_input, tool_response, cwd, last_assistant_message? }
    */
   private handleObservationsByClaudeId = this.wrapHandler((req: Request, res: Response): void => {
-    const { contentSessionId, tool_name, tool_input, tool_response, cwd } = req.body;
+    const { contentSessionId, tool_name, tool_input, tool_response, cwd, last_assistant_message } = req.body;
     const platformSource = normalizePlatformSource(req.body.platformSource);
     const project = typeof cwd === 'string' && cwd.trim() ? getProjectContext(cwd).primary : '';
 
@@ -638,7 +702,7 @@ export class SessionRoutes extends BaseRouteHandler {
         : '{}';
 
       // Queue observation
-      this.sessionManager.queueObservation(sessionDbId, {
+      const pendingMessageId = this.sessionManager.queueObservation(sessionDbId, {
         tool_name,
         tool_input: cleanedToolInput,
         tool_response: cleanedToolResponse,
@@ -649,7 +713,8 @@ export class SessionRoutes extends BaseRouteHandler {
             tool_name
           });
           return '';
-        })()
+        })(),
+        last_assistant_message
       });
 
       // Ensure SDK agent is running
@@ -657,6 +722,24 @@ export class SessionRoutes extends BaseRouteHandler {
 
       // Broadcast observation queued event
       this.eventBroadcaster.broadcastObservationQueued(sessionDbId);
+
+      const relatedFilePaths = this.extractOutcomeFilePaths(tool_input, cwd);
+      this.dbManager.getSessionStore().recordMemoryAssistOutcomeSignal({
+        contentSessionId,
+        sessionDbId,
+        pendingMessageId,
+        project,
+        platformSource,
+        promptNumber,
+        signalType: 'tool_use',
+        toolName: tool_name,
+        action: this.classifyOutcomeAction(tool_name),
+        filePath: relatedFilePaths[0] ?? null,
+        relatedFilePaths,
+        metadata: {
+          promptNumber,
+        },
+      });
 
       res.json({ status: 'queued' });
     } catch (error) {

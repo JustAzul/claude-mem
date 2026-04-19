@@ -6,12 +6,14 @@
  */
 
 import type { CorpusFile, CorpusObservation, CorpusFilter } from './types.js';
+import { logger } from '../../../utils/logger.js';
 
 export class CorpusRenderer {
   /**
    * Render all observations into a structured prompt string
    */
   renderCorpus(corpus: CorpusFile): string {
+    logger.debug(`[CorpusRenderer] rendering corpus "${corpus.name}" with ${corpus.observations.length} observations`);
     const sections: string[] = [];
 
     sections.push(`# Knowledge Corpus: ${corpus.name}`);
@@ -95,6 +97,7 @@ export class CorpusRenderer {
    * Auto-generate a system prompt based on filter params and corpus metadata
    */
   generateSystemPrompt(corpus: CorpusFile): string {
+    logger.debug(`[CorpusRenderer] generating system prompt for corpus "${corpus.name}"`);
     const filter = corpus.filter;
     const parts: string[] = [];
 

@@ -15,6 +15,7 @@ import { writeFileSync, readFileSync, mkdtempSync, rmSync, existsSync } from "no
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
+import { logger } from "../../utils/logger.js";
 
 // CJS-safe require for resolving external packages at runtime.
 // In ESM: import.meta.url works. In CJS bundle (esbuild): __filename works.
@@ -214,7 +215,10 @@ export function loadUserGrammars(projectRoot: string): UserGrammarConfig {
         QUERIES[queryKey] = queryContent;
         config.languageToQueryKey[language] = queryKey;
       } catch {
-        console.error(`[smart-file-read] Custom query file not found: ${fullQueryPath}, falling back to generic`);
+        logger.warn('SYSTEM', 'smart-file-read custom query file not found, using generic fallback', {
+          language,
+          fullQueryPath,
+        });
         config.languageToQueryKey[language] = "generic";
       }
     } else {
@@ -313,7 +317,11 @@ export function resolveGrammarPathWithFallback(language: string, projectRoot?: s
     // Grammar package not installed
   }
 
-  console.error(`[smart-file-read] Grammar package not found for "${language}": ${entry.package} (install it in your project's node_modules)`);
+  logger.warn('SYSTEM', 'smart-file-read grammar package not found in project node_modules', {
+    language,
+    packageName: entry.package,
+    projectRoot,
+  });
   return null;
 }
 

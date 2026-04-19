@@ -358,4 +358,78 @@ describe('MigrationRunner', () => {
       expect(summaries.count).toBe(1);
     });
   });
+
+  describe('migration 29 — decision DNA fields', () => {
+    it('should add why, alternatives_rejected, related_observation_ids columns to observations', () => {
+      const runner = new MigrationRunner(db);
+      runner.runAllMigrations();
+
+      const columns = getColumns(db, 'observations');
+      const columnNames = columns.map(c => c.name);
+
+      expect(columnNames).toContain('why');
+      expect(columnNames).toContain('alternatives_rejected');
+      expect(columnNames).toContain('related_observation_ids');
+    });
+
+    it('should record version 29 in schema_versions', () => {
+      const runner = new MigrationRunner(db);
+      runner.runAllMigrations();
+
+      const versions = getSchemaVersions(db);
+      expect(versions).toContain(29);
+    });
+
+    it('should include why and alternatives_rejected in observations_fts virtual table', () => {
+      const runner = new MigrationRunner(db);
+      runner.runAllMigrations();
+
+      // observations_fts is a virtual table — check its columns via PRAGMA
+      const ftsCols = db.prepare('PRAGMA table_info(observations_fts)').all() as Array<{ name: string }>;
+      const ftsColNames = ftsCols.map(c => c.name);
+
+      expect(ftsColNames).toContain('why');
+      expect(ftsColNames).toContain('alternatives_rejected');
+    });
+
+    it('should allow inserting observations with new fields and retrieving them', () => {
+      const runner = new MigrationRunner(db);
+      runner.runAllMigrations();
+
+      const now = new Date().toISOString();
+      const epoch = Date.now();
+
+      db.prepare(`
+        INSERT INTO sdk_sessions (content_session_id, memory_session_id, project, started_at, started_at_epoch, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run('v29-content', 'v29-memory', 'test-project', now, epoch, 'active');
+
+      db.prepare(`
+        INSERT INTO observations
+          (memory_session_id, project, type, title, narrative, created_at, created_at_epoch,
+           why, alternatives_rejected, related_observation_ids)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        'v29-memory', 'test-project', 'decision', 'Chose SQLite', 'Picked SQLite for simplicity.',
+        now, epoch,
+        'Avoids network latency inherent in remote stores.',
+        'Considered Redis — rejected for ops overhead.',
+        '[100, 200]'
+      );
+
+      const row = db.prepare(
+        'SELECT why, alternatives_rejected, related_observation_ids FROM observations WHERE type = ?'
+      ).get('decision') as { why: string; alternatives_rejected: string; related_observation_ids: string };
+
+      expect(row.why).toBe('Avoids network latency inherent in remote stores.');
+      expect(row.alternatives_rejected).toBe('Considered Redis — rejected for ops overhead.');
+      expect(JSON.parse(row.related_observation_ids)).toEqual([100, 200]);
+    });
+
+    it('should be idempotent — running V29 twice does not throw', () => {
+      const runner = new MigrationRunner(db);
+      runner.runAllMigrations();
+      expect(() => runner.runAllMigrations()).not.toThrow();
+    });
+  });
 });

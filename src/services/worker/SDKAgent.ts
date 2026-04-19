@@ -20,7 +20,8 @@ import { USER_SETTINGS_PATH, OBSERVER_SESSIONS_DIR, ensureDir } from '../../shar
 import { buildIsolatedEnv, getAuthMethodDescription } from '../../shared/EnvManager.js';
 import type { ActiveSession, SDKUserMessage } from '../worker-types.js';
 import { ModeManager } from '../domain/ModeManager.js';
-import { processAgentResponse, type WorkerRef } from './agents/index.js';
+import { processAgentResponse, type WorkerRef, type ToolContext } from './agents/index.js';
+import { toSnapshotString, type CaptureSnapshotSource } from '../sqlite/observations/capture-snapshot.js';
 import { createPidCapturingSpawn, getProcessBySession, ensureProcessExit, waitForSlot } from './ProcessRegistry.js';
 import { sanitizeEnv } from '../../supervisor/env-sanitizer.js';
 
@@ -46,6 +47,16 @@ export class SDKAgent {
     // Uses mutable object so generator updates are visible in response processing
     const cwdTracker = { lastCwd: undefined as string | undefined };
 
+    // Track tool context from the most recently yielded observation message so that
+    // processAgentResponse can override LLM-inferred file/type metadata with ground truth.
+    // Mutable object pattern mirrors cwdTracker — generator writes, response handler reads.
+    const toolContextTracker: { current: ToolContext | undefined } = { current: undefined };
+
+    // Track full capture snapshot source (user_prompt, prior_assistant_message,
+    // tool_input, tool_output, cwd) so V30 snapshot rows have ground truth for
+    // later rubric scoring. Set immediately before yielding each observation.
+    const captureSourceTracker: { current: CaptureSnapshotSource | undefined } = { current: undefined };
+
     // Find Claude executable
     const claudePath = this.findClaudeExecutable();
 
@@ -68,7 +79,7 @@ export class SDKAgent {
     ];
 
     // Create message generator (event-driven)
-    const messageGenerator = this.createMessageGenerator(session, cwdTracker);
+    const messageGenerator = this.createMessageGenerator(session, cwdTracker, toolContextTracker, captureSourceTracker);
 
     // CRITICAL: Only resume if:
     // 1. memorySessionId exists (was captured from a previous SDK response)
@@ -271,7 +282,9 @@ export class SDKAgent {
             originalTimestamp,
             'SDK',
             cwdTracker.lastCwd,
-            modelId
+            modelId,
+            toolContextTracker.current,
+            captureSourceTracker.current
           );
         }
 
@@ -333,7 +346,9 @@ export class SDKAgent {
    */
   private async *createMessageGenerator(
     session: ActiveSession,
-    cwdTracker: { lastCwd: string | undefined }
+    cwdTracker: { lastCwd: string | undefined },
+    toolContextTracker: { current: ToolContext | undefined },
+    captureSourceTracker: { current: CaptureSnapshotSource | undefined }
   ): AsyncIterableIterator<SDKUserMessage> {
     // Load active mode
     const mode = ModeManager.getInstance().getActiveMode();
@@ -392,7 +407,33 @@ export class SDKAgent {
           tool_output: JSON.stringify(message.tool_response),
           created_at_epoch: Date.now(),
           cwd: message.cwd
+        }, {
+          userRequest: session.userPrompt ?? null,
+          priorAssistantMessage: message.last_assistant_message ?? null,
         });
+
+        // Record tool context so processAgentResponse can override LLM-inferred metadata.
+        // Set immediately before yield so it is current when the SDK response is handled.
+        toolContextTracker.current = {
+          tool_name: message.tool_name!,
+          tool_input: message.tool_input,
+        };
+
+        // Record capture snapshot source so V30 snapshot rows can pair raw inputs
+        // with captured outputs. Tool input/output may arrive as either a parsed
+        // object (fresh enqueue path) or a string (double-serialized legacy rows),
+        // so stringify objects but pass strings through verbatim.
+        captureSourceTracker.current = {
+          memorySessionId: session.memorySessionId,
+          contentSessionId: session.contentSessionId,
+          promptNumber: session.lastPromptNumber,
+          userPrompt: session.userPrompt ?? null,
+          priorAssistantMessage: message.last_assistant_message ?? null,
+          toolName: message.tool_name ?? null,
+          toolInput: toSnapshotString(message.tool_input),
+          toolOutput: toSnapshotString(message.tool_response),
+          cwd: message.cwd ?? null,
+        };
 
         // Add to shared conversation history for provider interop
         session.conversationHistory.push({ role: 'user', content: obsPrompt });
@@ -415,6 +456,12 @@ export class SDKAgent {
           user_prompt: session.userPrompt,
           last_assistant_message: message.last_assistant_message || ''
         }, mode);
+
+        // Clear tool context before yielding the summary prompt so a stale observation
+        // context cannot bleed into processAgentResponse if the LLM hallucinates an
+        // <observation> block inside a summary response.
+        toolContextTracker.current = undefined;
+        captureSourceTracker.current = undefined;
 
         // Add to shared conversation history for provider interop
         session.conversationHistory.push({ role: 'user', content: summaryPrompt });

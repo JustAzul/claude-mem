@@ -296,6 +296,32 @@ export class PendingMessageStore {
   }
 
   /**
+   * Reset in-flight messages for graceful handoff to a new generator.
+   *
+   * Used on generator completion when the Claude Code parent session may
+   * still be active (e.g. worker restart, generator crash mid-flight).
+   * Unlike markAllSessionMessagesAbandoned, this keeps messages eligible
+   * for processing so the next worker/generator can claim them.
+   *
+   * 'pending' messages are left as-is (the UPDATE is a no-op for them).
+   * 'processing' messages get their in-flight marker (started_processing_at_epoch)
+   * cleared so the next generator can re-claim them without tripping stale
+   * processing guards.
+   *
+   * No change to messages in 'processed' or 'failed' — those are terminal.
+   *
+   * @returns Number of messages reset
+   */
+  requeueInFlightForSession(sessionDbId: number): number {
+    const stmt = this.db.prepare(`
+      UPDATE pending_messages
+      SET status = 'pending', started_processing_at_epoch = NULL
+      WHERE session_db_id = ? AND status IN ('pending', 'processing')
+    `);
+    return stmt.run(sessionDbId).changes;
+  }
+
+  /**
    * Abort a specific message (delete from queue)
    */
   abortMessage(messageId: number): boolean {

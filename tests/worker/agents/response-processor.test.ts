@@ -42,6 +42,8 @@ let loggerSpies: ReturnType<typeof spyOn>[] = [];
 describe('ResponseProcessor', () => {
   // Mocks
   let mockStoreObservations: ReturnType<typeof mock>;
+  let mockAttachGeneratedObservationsToOutcomeSignal: ReturnType<typeof mock>;
+  let mockAttachObservationOriginsToPendingMessage: ReturnType<typeof mock>;
   let mockChromaSyncObservation: ReturnType<typeof mock>;
   let mockChromaSyncSummary: ReturnType<typeof mock>;
   let mockBroadcast: ReturnType<typeof mock>;
@@ -65,6 +67,8 @@ describe('ResponseProcessor', () => {
       summaryId: 1,
       createdAtEpoch: 1700000000000,
     } as StorageResult));
+    mockAttachGeneratedObservationsToOutcomeSignal = mock(() => null);
+    mockAttachObservationOriginsToPendingMessage = mock(() => []);
 
     mockChromaSyncObservation = mock(() => Promise.resolve());
     mockChromaSyncSummary = mock(() => Promise.resolve());
@@ -72,6 +76,10 @@ describe('ResponseProcessor', () => {
     mockDbManager = {
       getSessionStore: () => ({
         storeObservations: mockStoreObservations,
+        attachGeneratedObservationsToOutcomeSignal: mockAttachGeneratedObservationsToOutcomeSignal,
+        attachObservationOriginsToPendingMessage: mockAttachObservationOriginsToPendingMessage,
+        insertContextOrigin: mock(() => null),
+        recordObservationTypeCorrection: mock(() => {}),
         ensureMemorySessionIdRegistered: mock(() => {}),  // FK fix (Issue #846)
         getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),  // FK fix (Issue #846)
       }),
@@ -171,6 +179,38 @@ describe('ResponseProcessor', () => {
       expect(observations[0].title).toBe('Found important pattern');
     });
 
+    it('attaches exact observation ids back to the claimed pending message', async () => {
+      const session = createMockSession({
+        processingMessageIds: [7001],
+      });
+      const responseText = `
+        <observation>
+          <type>discovery</type>
+          <title>Exact correlation</title>
+          <narrative>Links tool action to observation ids.</narrative>
+          <facts></facts>
+          <concepts></concepts>
+          <files_read><file>workspace/src/example/file.py</file></files_read>
+          <files_modified></files_modified>
+        </observation>
+      `;
+
+      await processAgentResponse(
+        responseText,
+        session,
+        mockDbManager,
+        mockSessionManager,
+        mockWorker,
+        100,
+        null,
+        'TestAgent'
+      );
+
+      expect(mockAttachGeneratedObservationsToOutcomeSignal).toHaveBeenCalledWith(7001, [1, 2]);
+      expect(mockAttachObservationOriginsToPendingMessage).toHaveBeenCalledWith(7001, [1, 2]);
+      expect(session.processingMessageIds).toEqual([]);
+    });
+
     it('should parse multiple observations from response', async () => {
       const session = createMockSession();
       const responseText = `
@@ -187,6 +227,7 @@ describe('ResponseProcessor', () => {
           <type>bugfix</type>
           <title>Fixed null pointer</title>
           <narrative>Second narrative</narrative>
+          <why>null pointer dereferenced when input was empty</why>
           <facts></facts>
           <concepts></concepts>
           <files_read></files_read>
@@ -303,6 +344,10 @@ describe('ResponseProcessor', () => {
       }));
       (mockDbManager.getSessionStore as any) = () => ({
         storeObservations: mockStoreObservations,
+        attachGeneratedObservationsToOutcomeSignal: mockAttachGeneratedObservationsToOutcomeSignal,
+        attachObservationOriginsToPendingMessage: mockAttachObservationOriginsToPendingMessage,
+        insertContextOrigin: mock(() => null),
+        recordObservationTypeCorrection: mock(() => {}),
         ensureMemorySessionIdRegistered: mock(() => {}),
         getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),
       });
@@ -403,6 +448,10 @@ describe('ResponseProcessor', () => {
       }));
       (mockDbManager.getSessionStore as any) = () => ({
         storeObservations: mockStoreObservations,
+        attachGeneratedObservationsToOutcomeSignal: mockAttachGeneratedObservationsToOutcomeSignal,
+        attachObservationOriginsToPendingMessage: mockAttachObservationOriginsToPendingMessage,
+        insertContextOrigin: mock(() => null),
+        recordObservationTypeCorrection: mock(() => {}),
         ensureMemorySessionIdRegistered: mock(() => {}),
         getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),
       });
@@ -484,6 +533,10 @@ describe('ResponseProcessor', () => {
       }));
       (mockDbManager.getSessionStore as any) = () => ({
         storeObservations: mockStoreObservations,
+        attachGeneratedObservationsToOutcomeSignal: mockAttachGeneratedObservationsToOutcomeSignal,
+        attachObservationOriginsToPendingMessage: mockAttachObservationOriginsToPendingMessage,
+        insertContextOrigin: mock(() => null),
+        recordObservationTypeCorrection: mock(() => {}),
         ensureMemorySessionIdRegistered: mock(() => {}),
         getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),
       });
@@ -519,6 +572,10 @@ describe('ResponseProcessor', () => {
         storeObservations: mockStoreObservations,
         ensureMemorySessionIdRegistered: mock(() => {}),
         getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),
+        insertContextOrigin: mock(() => null),
+        recordObservationTypeCorrection: mock(() => {}),
+        attachObservationOriginsToPendingMessage: mock(() => []),
+        attachGeneratedObservationsToOutcomeSignal: mock(() => null),
       });
 
       await processAgentResponse(
@@ -563,6 +620,10 @@ describe('ResponseProcessor', () => {
         storeObservations: mockStoreObservations,
         ensureMemorySessionIdRegistered: mock(() => {}),
         getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),
+        insertContextOrigin: mock(() => null),
+        recordObservationTypeCorrection: mock(() => {}),
+        attachObservationOriginsToPendingMessage: mock(() => []),
+        attachGeneratedObservationsToOutcomeSignal: mock(() => null),
       });
 
       await processAgentResponse(
@@ -601,6 +662,10 @@ describe('ResponseProcessor', () => {
         storeObservations: mockStoreObservations,
         ensureMemorySessionIdRegistered: mock(() => {}),
         getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),
+        insertContextOrigin: mock(() => null),
+        recordObservationTypeCorrection: mock(() => {}),
+        attachObservationOriginsToPendingMessage: mock(() => []),
+        attachGeneratedObservationsToOutcomeSignal: mock(() => null),
       });
 
       await processAgentResponse(
@@ -643,6 +708,10 @@ describe('ResponseProcessor', () => {
         storeObservations: mockStoreObservations,
         ensureMemorySessionIdRegistered: mock(() => {}),
         getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),
+        insertContextOrigin: mock(() => null),
+        recordObservationTypeCorrection: mock(() => {}),
+        attachObservationOriginsToPendingMessage: mock(() => []),
+        attachGeneratedObservationsToOutcomeSignal: mock(() => null),
       });
 
       await processAgentResponse(

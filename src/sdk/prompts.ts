@@ -61,6 +61,20 @@ ${mode.prompts.output_format_header}
     ${mode.prompts.field_guidance}
   -->
   <narrative>${mode.prompts.xml_narrative_placeholder}</narrative>
+  <why>${mode.prompts.xml_why_placeholder}</why>
+  <!--
+    ${mode.prompts.why_guidance}
+  -->
+  <alternatives_rejected>${mode.prompts.xml_alternatives_placeholder}</alternatives_rejected>
+  <!--
+    ${mode.prompts.alternatives_guidance}
+  -->
+  <related>
+    <id>${mode.prompts.xml_related_placeholder}</id>
+  </related>
+  <!--
+    ${mode.prompts.related_guidance}
+  -->
   <concepts>
     <concept>${mode.prompts.xml_concept_placeholder}</concept>
     <concept>${mode.prompts.xml_concept_placeholder}</concept>
@@ -68,14 +82,6 @@ ${mode.prompts.output_format_header}
   <!--
     ${mode.prompts.concept_guidance}
   -->
-  <files_read>
-    <file>${mode.prompts.xml_file_placeholder}</file>
-    <file>${mode.prompts.xml_file_placeholder}</file>
-  </files_read>
-  <files_modified>
-    <file>${mode.prompts.xml_file_placeholder}</file>
-    <file>${mode.prompts.xml_file_placeholder}</file>
-  </files_modified>
 </observation>
 \`\`\`
 ${mode.prompts.format_examples}
@@ -85,10 +91,68 @@ ${mode.prompts.footer}
 ${mode.prompts.header_memory_start}`;
 }
 
+export interface ObservationTurnContext {
+  userRequest: string | null;
+  priorAssistantMessage: string | null;
+}
+
+function truncateWithSuffix(text: string, max: number): string {
+  if (!text) return '';
+  return text.length <= max ? text : text.slice(0, max) + '…(truncated)';
+}
+
+function escapeXml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// High-confidence secret patterns. We only match things that cannot plausibly
+// be normal prose — prefixes like "sk-ant-", "ghp_", "AKIA", and full JWTs. The
+// goal is to prevent tokens/keys from reaching third-party LLM providers via
+// the user_request/prior_assistant channels H1 opened, while keeping ordinary
+// text unmangled. Over-redaction would hurt intent_fit gains from H1.
+const SECRET_PATTERNS: Array<{ name: string; re: RegExp }> = [
+  { name: 'anthropic_key', re: /sk-ant-[A-Za-z0-9_-]{20,}/g },
+  { name: 'openai_key', re: /sk-(?:proj-)?[A-Za-z0-9_-]{20,}/g },
+  { name: 'github_token', re: /gh[pousr]_[A-Za-z0-9]{36,}/g },
+  { name: 'aws_access_key', re: /\bAKIA[0-9A-Z]{16}\b/g },
+  { name: 'jwt', re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g },
+  // Authorization: Bearer <token> (case-insensitive header form)
+  { name: 'bearer_token', re: /\bBearer\s+[A-Za-z0-9._-]{20,}/gi },
+  // key=value assignments where the key name signals a secret. Matches up to
+  // the next whitespace, quote, or &/; separator (common in URLs/envs).
+  { name: 'named_secret', re: /\b(?:api[_-]?key|secret|password|passwd|access[_-]?token|refresh[_-]?token)\s*[:=]\s*["']?([^\s"'&;]{6,})/gi },
+];
+
+export function redactSecrets(text: string): string {
+  let out = text;
+  for (const { re } of SECRET_PATTERNS) {
+    out = out.replace(re, (match) => {
+      // For key=value patterns, preserve the left side so context stays readable.
+      const eqIdx = match.search(/[:=]/);
+      if (eqIdx > -1 && /\b(?:api[_-]?key|secret|password|passwd|access[_-]?token|refresh[_-]?token)/i.test(match.slice(0, eqIdx))) {
+        return match.slice(0, eqIdx + 1) + '[REDACTED]';
+      }
+      return '[REDACTED]';
+    });
+  }
+  return out;
+}
+
+function renderTurnContextField(raw: string | null | undefined, max: number): string {
+  if (raw == null || raw === '') return '(not available)';
+  return escapeXml(truncateWithSuffix(redactSecrets(raw), max));
+}
+
 /**
  * Build prompt to send tool observation to SDK agent
+ *
+ * turnContext threads the per-turn user intent + prior assistant message into
+ * every per-observation prompt. An audit (intent_fit 0.40, 80% ceiling) showed
+ * the capture LLM couldn't align observations with user intent because it only
+ * saw the tool call in isolation. Without turnContext, the fields render as
+ * "(not available)" so legacy callers still work.
  */
-export function buildObservationPrompt(obs: Observation): string {
+export function buildObservationPrompt(obs: Observation, turnContext?: ObservationTurnContext): string {
   // Safely parse tool_input and tool_output - they're already JSON strings
   let toolInput: any;
   let toolOutput: any;
@@ -111,7 +175,12 @@ export function buildObservationPrompt(obs: Observation): string {
     toolOutput = obs.tool_output;
   }
 
+  const userRequestBlock = renderTurnContextField(turnContext?.userRequest, 500);
+  const priorAssistantBlock = renderTurnContextField(turnContext?.priorAssistantMessage, 300);
+
   return `<observed_from_primary_session>
+  <user_request>${userRequestBlock}</user_request>
+  <prior_assistant_message>${priorAssistantBlock}</prior_assistant_message>
   <what_happened>${obs.tool_name}</what_happened>
   <occurred_at>${new Date(obs.created_at_epoch).toISOString()}</occurred_at>${obs.cwd ? `\n  <working_directory>${obs.cwd}</working_directory>` : ''}
   <parameters>${JSON.stringify(toolInput, null, 2)}</parameters>
@@ -217,6 +286,20 @@ ${mode.prompts.output_format_header}
     ${mode.prompts.field_guidance}
   -->
   <narrative>${mode.prompts.xml_narrative_placeholder}</narrative>
+  <why>${mode.prompts.xml_why_placeholder}</why>
+  <!--
+    ${mode.prompts.why_guidance}
+  -->
+  <alternatives_rejected>${mode.prompts.xml_alternatives_placeholder}</alternatives_rejected>
+  <!--
+    ${mode.prompts.alternatives_guidance}
+  -->
+  <related>
+    <id>${mode.prompts.xml_related_placeholder}</id>
+  </related>
+  <!--
+    ${mode.prompts.related_guidance}
+  -->
   <concepts>
     <concept>${mode.prompts.xml_concept_placeholder}</concept>
     <concept>${mode.prompts.xml_concept_placeholder}</concept>
@@ -224,14 +307,6 @@ ${mode.prompts.output_format_header}
   <!--
     ${mode.prompts.concept_guidance}
   -->
-  <files_read>
-    <file>${mode.prompts.xml_file_placeholder}</file>
-    <file>${mode.prompts.xml_file_placeholder}</file>
-  </files_read>
-  <files_modified>
-    <file>${mode.prompts.xml_file_placeholder}</file>
-    <file>${mode.prompts.xml_file_placeholder}</file>
-  </files_modified>
 </observation>
 \`\`\`
 ${mode.prompts.format_examples}

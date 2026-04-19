@@ -41,6 +41,9 @@ interface StoredObservation {
   discovery_tokens: number; // ROI metrics
   created_at: string;
   created_at_epoch: number;
+  why: string | null;
+  alternatives_rejected: string | null;
+  related_observation_ids: string | null; // JSON array of integers
 }
 
 interface StoredSummary {
@@ -179,6 +182,24 @@ export class ChromaSync {
         metadata: { ...baseMetadata, field_type: 'fact', fact_index: index }
       });
     });
+
+    // Decision DNA fields (V29) — indexed so semantic queries on rationale or
+    // rejected alternatives can match. Without these, Chroma is blind to WHY
+    // an observation exists, while FTS5 (text) is not.
+    if (obs.why) {
+      documents.push({
+        id: `obs_${obs.id}_why`,
+        document: obs.why,
+        metadata: { ...baseMetadata, field_type: 'why' }
+      });
+    }
+    if (obs.alternatives_rejected) {
+      documents.push({
+        id: `obs_${obs.id}_alternatives_rejected`,
+        document: obs.alternatives_rejected,
+        metadata: { ...baseMetadata, field_type: 'alternatives_rejected' }
+      });
+    }
 
     return documents;
   }
@@ -358,7 +379,13 @@ export class ChromaSync {
       prompt_number: promptNumber,
       discovery_tokens: discoveryTokens,
       created_at: new Date(createdAtEpoch * 1000).toISOString(),
-      created_at_epoch: createdAtEpoch
+      created_at_epoch: createdAtEpoch,
+      why: obs.why ?? null,
+      alternatives_rejected: obs.alternatives_rejected ?? null,
+      related_observation_ids:
+        obs.related_observation_ids && obs.related_observation_ids.length > 0
+          ? JSON.stringify(obs.related_observation_ids)
+          : null
     };
 
     const documents = this.formatObservationDocs(stored);

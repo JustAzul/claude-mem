@@ -96,7 +96,10 @@ import { SearchRoutes } from './worker/http/routes/SearchRoutes.js';
 import { SettingsRoutes } from './worker/http/routes/SettingsRoutes.js';
 import { LogsRoutes } from './worker/http/routes/LogsRoutes.js';
 import { MemoryRoutes } from './worker/http/routes/MemoryRoutes.js';
+import { MemoryAssistRoutes } from './worker/http/routes/MemoryAssistRoutes.js';
 import { CorpusRoutes } from './worker/http/routes/CorpusRoutes.js';
+import { McpUsageRoutes } from './worker/http/routes/McpUsageRoutes.js';
+import { MemoryAssistTracker } from './worker/MemoryAssistTracker.js';
 
 // Knowledge agent services
 import { CorpusStore } from './worker/knowledge/CorpusStore.js';
@@ -105,6 +108,8 @@ import { KnowledgeAgent } from './worker/knowledge/KnowledgeAgent.js';
 
 // Process management for zombie cleanup (Issue #737)
 import { startOrphanReaper, reapOrphanedProcesses, getProcessBySession, ensureProcessExit } from './worker/ProcessRegistry.js';
+
+const MEMORY_ASSIST_RECENT_HYDRATION_WINDOW_DAYS = 30;
 
 /**
  * Build JSON status output for hook framework communication.
@@ -144,6 +149,7 @@ export class WorkerService {
   private dbManager: DatabaseManager;
   private sessionManager: SessionManager;
   private sseBroadcaster: SSEBroadcaster;
+  private memoryAssistTracker: MemoryAssistTracker;
   private sdkAgent: SDKAgent;
   private geminiAgent: GeminiAgent;
   private openRouterAgent: OpenRouterAgent;
@@ -190,6 +196,7 @@ export class WorkerService {
     this.dbManager = new DatabaseManager();
     this.sessionManager = new SessionManager(this.dbManager);
     this.sseBroadcaster = new SSEBroadcaster();
+    this.memoryAssistTracker = new MemoryAssistTracker(this.sseBroadcaster);
     this.sdkAgent = new SDKAgent(this.dbManager, this.sessionManager);
     this.geminiAgent = new GeminiAgent(this.dbManager, this.sessionManager);
     this.openRouterAgent = new OpenRouterAgent(this.dbManager, this.sessionManager);
@@ -300,12 +307,17 @@ export class WorkerService {
     });
 
     // Standard routes (registered AFTER guard middleware)
-    this.server.registerRoutes(new ViewerRoutes(this.sseBroadcaster, this.dbManager, this.sessionManager));
+    this.server.registerRoutes(new ViewerRoutes(this.sseBroadcaster, this.dbManager, this.sessionManager, this.memoryAssistTracker));
     this.server.registerRoutes(new SessionRoutes(this.sessionManager, this.dbManager, this.sdkAgent, this.geminiAgent, this.openRouterAgent, this.customOpenAIAgent, this.sessionEventBroadcaster, this));
     this.server.registerRoutes(new DataRoutes(this.paginationHelper, this.dbManager, this.sessionManager, this.sseBroadcaster, this, this.startTime));
     this.server.registerRoutes(new SettingsRoutes(this.settingsManager));
     this.server.registerRoutes(new LogsRoutes());
+    this.server.registerRoutes(new MemoryAssistRoutes(
+      this.memoryAssistTracker,
+      this.dbManager
+    ));
     this.server.registerRoutes(new MemoryRoutes(this.dbManager, 'claude-mem'));
+    this.server.registerRoutes(new McpUsageRoutes(this.dbManager));
   }
 
   /**
@@ -377,6 +389,21 @@ export class WorkerService {
       logger.info('SYSTEM', `Mode loaded: ${modeId}`);
 
       await this.dbManager.initialize();
+      const fileTokenBackfill = this.dbManager.getSessionStore().backfillRecentFileContextTokenEstimates({
+        limit: 200,
+        windowDays: MEMORY_ASSIST_RECENT_HYDRATION_WINDOW_DAYS,
+      });
+      logger.debug(`[WorkerService] file-context token backfill updated=${fileTokenBackfill.updatedCount}`);
+      const originBackfill = this.dbManager.getSessionStore().backfillRecentObservationOrigins({
+        limit: 200,
+        windowDays: MEMORY_ASSIST_RECENT_HYDRATION_WINDOW_DAYS,
+      });
+      logger.debug(`[WorkerService] observation origin backfill resolved=${originBackfill.resolvedCount} unresolved=${originBackfill.unresolvedCount}`);
+      const hydratedMemoryAssistDecisions = this.dbManager.getSessionStore().backfillRecentMemoryAssistEvidence({
+        limit: 50,
+        windowDays: MEMORY_ASSIST_RECENT_HYDRATION_WINDOW_DAYS,
+      });
+      this.memoryAssistTracker.hydrate(hydratedMemoryAssistDecisions);
 
       // Reset any messages that were processing when worker died
       const { PendingMessageStore } = await import('./sqlite/PendingMessageStore.js');
@@ -396,7 +423,17 @@ export class WorkerService {
         formattingService,
         timelineService
       );
-      this.searchRoutes = new SearchRoutes(searchManager);
+      const { PromptSemanticAssistService } = await import('./worker/context/PromptSemanticAssistService.js');
+      const semanticAssistService = new PromptSemanticAssistService(
+        this.dbManager.getSessionStore(),
+        this.dbManager.getChromaSync()
+      );
+      this.searchRoutes = new SearchRoutes(
+        searchManager,
+        semanticAssistService,
+        this.memoryAssistTracker,
+        this.dbManager
+      );
       this.server.registerRoutes(this.searchRoutes);
       logger.info('WORKER', 'SearchManager initialized and search routes registered');
 

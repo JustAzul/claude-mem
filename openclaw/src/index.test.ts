@@ -309,7 +309,7 @@ describe("Observation I/O event handlers", () => {
     workerServer?.close();
   });
 
-  it("session_start sends session init to worker", async () => {
+  it("session_start tracks session without initing the worker", async () => {
     const { api, logs, fireEvent } = createMockApi({ workerPort });
     claudeMemPlugin(api);
 
@@ -321,13 +321,11 @@ describe("Observation I/O event handlers", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     const initRequest = receivedRequests.find((r) => r.url === "/api/sessions/init");
-    assert.ok(initRequest, "should send init request to worker");
-    assert.equal(initRequest!.body.project, "openclaw");
-    assert.ok(initRequest!.body.contentSessionId.startsWith("openclaw-agent-1-"));
-    assert.ok(logs.some((l) => l.includes("Session initialized")));
+    assert.ok(!initRequest, "session_start should defer init until before_agent_start");
+    assert.ok(logs.some((l) => l.includes("Session tracking initialized")));
   });
 
-  it("session_start calls init on worker", async () => {
+  it("session_start does not call init on worker", async () => {
     const { api, fireEvent } = createMockApi({ workerPort });
     claudeMemPlugin(api);
 
@@ -335,18 +333,19 @@ describe("Observation I/O event handlers", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     const initRequests = receivedRequests.filter((r) => r.url === "/api/sessions/init");
-    assert.equal(initRequests.length, 1, "should init on session_start");
+    assert.equal(initRequests.length, 0, "session_start should not init the worker");
   });
 
-  it("after_compaction re-inits session on worker", async () => {
-    const { api, fireEvent } = createMockApi({ workerPort });
+  it("after_compaction preserves tracking without re-init", async () => {
+    const { api, logs, fireEvent } = createMockApi({ workerPort });
     claudeMemPlugin(api);
 
     await fireEvent("after_compaction", { messageCount: 5, compactedCount: 3 }, {});
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     const initRequests = receivedRequests.filter((r) => r.url === "/api/sessions/init");
-    assert.equal(initRequests.length, 1, "should re-init after compaction");
+    assert.equal(initRequests.length, 0, "after_compaction should preserve tracking without re-init");
+    assert.ok(logs.some((l) => l.includes("Session preserved after compaction")));
   });
 
   it("before_agent_start calls init for session privacy check", async () => {
@@ -364,8 +363,7 @@ describe("Observation I/O event handlers", () => {
     const { api, fireEvent } = createMockApi({ workerPort });
     claudeMemPlugin(api);
 
-    // Establish contentSessionId via session_start
-    await fireEvent("session_start", { sessionId: "s1" }, { sessionKey: "test-agent" });
+    await fireEvent("before_agent_start", { prompt: "inspect src/index.ts" }, { sessionKey: "test-agent" });
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     // Fire tool result event
@@ -375,7 +373,7 @@ describe("Observation I/O event handlers", () => {
       message: {
         content: [{ type: "text", text: "file contents here..." }],
       },
-    }, { sessionKey: "test-agent" });
+    }, { sessionKey: "test-agent", workspaceDir: "/tmp/project" });
 
     await new Promise((resolve) => setTimeout(resolve, 100));
 
@@ -407,13 +405,15 @@ describe("Observation I/O event handlers", () => {
     claudeMemPlugin(api);
 
     const longText = "x".repeat(2000);
+    await fireEvent("before_agent_start", { prompt: "run bash ls" }, { sessionKey: "truncate-test" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
     await fireEvent("tool_result_persist", {
       toolName: "Bash",
       params: { command: "ls" },
       message: {
         content: [{ type: "text", text: longText }],
       },
-    }, {});
+    }, { sessionKey: "truncate-test", workspaceDir: "/tmp/project" });
 
     await new Promise((resolve) => setTimeout(resolve, 100));
 
@@ -423,11 +423,10 @@ describe("Observation I/O event handlers", () => {
   });
 
   it("agent_end sends summarize and complete to worker", async () => {
-    const { api, fireEvent } = createMockApi({ workerPort });
+    const { api, fireEvent } = createMockApi({ workerPort, completionDelayMs: 0 });
     claudeMemPlugin(api);
 
-    // Establish session
-    await fireEvent("session_start", { sessionId: "s1" }, { sessionKey: "summarize-test" });
+    await fireEvent("before_agent_start", { prompt: "help me" }, { sessionKey: "summarize-test" });
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     // Fire agent end
@@ -480,7 +479,7 @@ describe("Observation I/O event handlers", () => {
     const { api, fireEvent } = createMockApi({ workerPort, project: "my-project" });
     claudeMemPlugin(api);
 
-    await fireEvent("session_start", { sessionId: "s1" }, {});
+    await fireEvent("before_agent_start", { prompt: "hello" }, {});
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     const initRequest = receivedRequests.find((r) => r.url === "/api/sessions/init");
@@ -516,14 +515,14 @@ describe("Observation I/O event handlers", () => {
     const { api, fireEvent } = createMockApi({ workerPort });
     claudeMemPlugin(api);
 
-    await fireEvent("session_start", { sessionId: "s1" }, { sessionKey: "reuse-test" });
+    await fireEvent("before_agent_start", { prompt: "reuse me" }, { sessionKey: "reuse-test" });
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     await fireEvent("tool_result_persist", {
       toolName: "Read",
       params: { file_path: "/src/index.ts" },
       message: { content: [{ type: "text", text: "contents" }] },
-    }, { sessionKey: "reuse-test" });
+    }, { sessionKey: "reuse-test", workspaceDir: "/tmp/project" });
 
     await new Promise((resolve) => setTimeout(resolve, 100));
 

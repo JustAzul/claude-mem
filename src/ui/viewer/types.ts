@@ -1,3 +1,5 @@
+import type { MemoryAssistEvent } from '../../shared/memory-assist';
+
 export interface Observation {
   id: number;
   memory_session_id: string;
@@ -46,13 +48,15 @@ export type FeedItem =
   | (UserPrompt & { itemType: 'prompt' });
 
 export interface StreamEvent {
-  type: 'initial_load' | 'new_observation' | 'new_summary' | 'new_prompt' | 'processing_status';
+  type: 'initial_load' | 'new_observation' | 'new_summary' | 'new_prompt' | 'processing_status' | 'memory_assist_status';
   observations?: Observation[];
   summaries?: Summary[];
   prompts?: UserPrompt[];
   projects?: string[];
   sources?: string[];
   projectsBySource?: Record<string, string[]>;
+  memoryAssistEvents?: MemoryAssistEvent[];
+  memoryAssist?: MemoryAssistEvent;
   observation?: Observation;
   summary?: Summary;
   prompt?: UserPrompt;
@@ -103,6 +107,13 @@ export interface Settings {
   // Feature Toggles
   CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY?: string;
   CLAUDE_MEM_CONTEXT_SHOW_LAST_MESSAGE?: string;
+  CLAUDE_MEM_SEMANTIC_INJECT?: string;
+  CLAUDE_MEM_SEMANTIC_INJECT_LIMIT?: string;
+  CLAUDE_MEM_SEMANTIC_INJECT_THRESHOLD?: string;
+
+  // Calibration recommender gate — 'true' pauses prescriptive output until
+  // Probe B lands a validated content-reuse signal
+  CLAUDE_MEM_RECOMMENDER_PAUSED?: string;
 }
 
 export interface WorkerStats {
@@ -119,7 +130,16 @@ export interface DatabaseStats {
   summaries?: number;
 }
 
+export interface TokenEconomicsStats {
+  totalObservations: number;
+  totalReadTokens: number;
+  totalDiscoveryTokens: number;
+  savings: number;
+  savingsPercent: number;
+}
+
 export interface Stats {
   worker?: WorkerStats;
   database?: DatabaseStats;
+  tokenEconomics?: TokenEconomicsStats;
 }

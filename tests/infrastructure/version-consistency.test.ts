@@ -17,6 +17,7 @@ const projectRoot = path.resolve(__dirname, '../..');
  */
 describe('Version Consistency', () => {
   let rootVersion: string;
+  const semverPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
   it('should read version from root package.json', () => {
     const packageJsonPath = path.join(projectRoot, 'package.json');
@@ -24,7 +25,7 @@ describe('Version Consistency', () => {
     
     const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
     expect(packageJson.version).toBeDefined();
-    expect(packageJson.version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(packageJson.version).toMatch(semverPattern);
     
     rootVersion = packageJson.version;
   });
@@ -98,9 +99,9 @@ describe('Version Consistency', () => {
 
   it('should validate version format is semver compliant', () => {
     // Ensure version follows semantic versioning: MAJOR.MINOR.PATCH
-    expect(rootVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(rootVersion).toMatch(semverPattern);
     
-    const [major, minor, patch] = rootVersion.split('.').map(Number);
+    const [major, minor, patch] = rootVersion.split('-')[0].split('.').map(Number);
     expect(major).toBeGreaterThanOrEqual(0);
     expect(minor).toBeGreaterThanOrEqual(0);
     expect(patch).toBeGreaterThanOrEqual(0);

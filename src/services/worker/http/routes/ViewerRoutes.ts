@@ -7,19 +7,21 @@
 
 import express, { Request, Response } from 'express';
 import path from 'path';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, statSync } from 'fs';
 import { logger } from '../../../../utils/logger.js';
 import { getPackageRoot } from '../../../../shared/paths.js';
 import { SSEBroadcaster } from '../../SSEBroadcaster.js';
 import { DatabaseManager } from '../../DatabaseManager.js';
 import { SessionManager } from '../../SessionManager.js';
+import { MemoryAssistTracker } from '../../MemoryAssistTracker.js';
 import { BaseRouteHandler } from '../BaseRouteHandler.js';
 
 export class ViewerRoutes extends BaseRouteHandler {
   constructor(
     private sseBroadcaster: SSEBroadcaster,
     private dbManager: DatabaseManager,
-    private sessionManager: SessionManager
+    private sessionManager: SessionManager,
+    private memoryAssistTracker: MemoryAssistTracker
   ) {
     super();
   }
@@ -60,8 +62,15 @@ export class ViewerRoutes extends BaseRouteHandler {
     }
 
     const html = readFileSync(viewerPath, 'utf-8');
+    const bundlePath = path.join(path.dirname(viewerPath), 'viewer-bundle.js');
+    const versionToken = this.getViewerBundleVersionToken(packageRoot, bundlePath);
+    const hydratedHtml = html.replace(
+      'viewer-bundle.js',
+      `viewer-bundle.js?v=${encodeURIComponent(versionToken)}`
+    );
+    res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Content-Type', 'text/html');
-    res.send(html);
+    res.send(hydratedHtml);
   });
 
   /**
@@ -91,6 +100,7 @@ export class ViewerRoutes extends BaseRouteHandler {
       projects: projectCatalog.projects,
       sources: projectCatalog.sources,
       projectsBySource: projectCatalog.projectsBySource,
+      memoryAssistEvents: this.memoryAssistTracker.getRecent(50),
       timestamp: Date.now()
     });
 
@@ -103,4 +113,34 @@ export class ViewerRoutes extends BaseRouteHandler {
       queueDepth
     });
   });
+
+  private getViewerBundleVersionToken(packageRoot: string, bundlePath: string): string {
+    let packageVersion = 'dev';
+    try {
+      const packageJsonPath = path.join(packageRoot, 'package.json');
+      if (existsSync(packageJsonPath)) {
+        const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8')) as { version?: string };
+        packageVersion = packageJson.version || packageVersion;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(`[ViewerRoutes] failed to read package version for cache-busting: ${message}`);
+    }
+
+    let bundleMtime = '0';
+    try {
+      if (existsSync(bundlePath)) {
+        bundleMtime = String(Math.trunc(statSync(bundlePath).mtimeMs));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(`[ViewerRoutes] failed to read viewer bundle mtime for cache-busting: ${message}`);
+    }
+
+    const processStart = typeof process.uptime === 'function'
+      ? String(Date.now() - Math.trunc(process.uptime() * 1000))
+      : String(Date.now());
+
+    return `${packageVersion}-${bundleMtime}-${processStart}`;
+  }
 }

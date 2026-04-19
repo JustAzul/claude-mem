@@ -27,8 +27,10 @@ import {
   shouldFallbackToClaude,
   isAbortError,
   type WorkerRef,
-  type FallbackAgent
+  type FallbackAgent,
+  type ToolContext
 } from './agents/index.js';
+import { toSnapshotString, type CaptureSnapshotSource } from '../sqlite/observations/capture-snapshot.js';
 
 // Gemini API endpoint — use v1 (stable), not v1beta.
 // v1beta does not support newer models like gemini-3-flash.
@@ -229,6 +231,9 @@ export class GeminiAgent {
             tool_output: JSON.stringify(message.tool_response),
             created_at_epoch: originalTimestamp ?? Date.now(),
             cwd: message.cwd
+          }, {
+            userRequest: session.userPrompt ?? null,
+            priorAssistantMessage: message.last_assistant_message ?? null,
           });
 
           // Add to conversation history and query Gemini with full context
@@ -247,6 +252,21 @@ export class GeminiAgent {
 
           // Process response using shared ResponseProcessor
           if (obsResponse.content) {
+            const toolContext: ToolContext = {
+              tool_name: message.tool_name!,
+              tool_input: message.tool_input,
+            };
+            const captureSource: CaptureSnapshotSource = {
+              memorySessionId: session.memorySessionId,
+              contentSessionId: session.contentSessionId,
+              promptNumber: session.lastPromptNumber,
+              userPrompt: session.userPrompt ?? null,
+              priorAssistantMessage: message.last_assistant_message ?? null,
+              toolName: message.tool_name ?? null,
+              toolInput: toSnapshotString(message.tool_input),
+              toolOutput: toSnapshotString(message.tool_response),
+              cwd: message.cwd ?? null,
+            };
             await processAgentResponse(
               obsResponse.content,
               session,
@@ -257,7 +277,9 @@ export class GeminiAgent {
               originalTimestamp,
               'Gemini',
               lastCwd,
-              model
+              model,
+              toolContext,
+              captureSource
             );
           } else {
             logger.warn('SDK', 'Empty Gemini observation response, skipping processing to preserve message', {
