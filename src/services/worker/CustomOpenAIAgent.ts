@@ -137,6 +137,13 @@ export class CustomOpenAIAgent {
             throw new Error('Cannot process observations: memorySessionId not yet captured.');
           }
 
+          // Pass turn context (userRequest + priorAssistantMessage) for cross-provider
+          // contract parity with SDKAgent/OpenRouterAgent. A paired ablation POC on
+          // gpt-5.4-mini (scripts/poc-observation-context-ablation.mjs, run_id
+          // ctx-abl-1776688705960, n=20) found these fields neutral on this provider
+          // (fidelity Δ=-0.018, intent_fit Δ=+0.005, +6% prompt tokens) — kept anyway
+          // because the gain is real on the Claude SDK path and dropping them would
+          // diverge the per-provider contract. Re-run the POC before removing.
           const obsPrompt = buildObservationPrompt({
             id: 0,
             tool_name: message.tool_name!,
