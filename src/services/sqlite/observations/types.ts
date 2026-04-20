@@ -19,6 +19,9 @@ export interface ObservationInput {
   why?: string | null;
   alternatives_rejected?: string | null;
   related_observation_ids?: number[];
+  // Claude Code subagent identity — NULL for main-session rows.
+  agent_type?: string | null;
+  agent_id?: string | null;
 }
 
 /**

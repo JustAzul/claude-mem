@@ -109,55 +109,67 @@ function installMcpIntegration(config: McpInstallerConfig): () => Promise<number
       return 1;
     }
 
+    const configPath = config.configPath;
+
+    // Warp special case: skip config write if ~/.warp/ doesn't exist
+    const skipWarpConfigWrite = config.ideId === 'warp' && !existsSync(path.dirname(configPath));
+
+    let contextPath: string | undefined;
+    if (config.contextFile) {
+      contextPath = config.contextFile.path;
+    }
+
     try {
-      // Write MCP config
-      const configPath = config.configPath;
-
-      // Warp special case: skip config write if ~/.warp/ doesn't exist
-      if (config.ideId === 'warp' && !existsSync(path.dirname(configPath))) {
-        process.stdout.write('  Note: ~/.warp/ not found. MCP may need to be configured via Warp Drive UI.\n');
-      } else {
-        writeMcpJsonConfig(configPath, mcpServerPath, config.configKey);
-        process.stdout.write(`  MCP config written to: ${configPath}\n`);
-      }
-
-      // Inject context if configured
-      let contextPath: string | undefined;
-      if (config.contextFile) {
-        contextPath = config.contextFile.path;
-        injectContextIntoMarkdownFile(contextPath, PLACEHOLDER_CONTEXT);
-        process.stdout.write(`  Context placeholder written to: ${contextPath}\n`);
-      }
-
-      // Print summary
-      const summaryLines = [`\nInstallation complete!\n`];
-      summaryLines.push(`MCP config:  ${configPath}`);
-      if (contextPath) {
-        summaryLines.push(`Context:     ${contextPath}`);
-      }
-      summaryLines.push('');
-      summaryLines.push(`Note: This is an MCP-only integration providing search tools and context.`);
-      summaryLines.push(`Transcript capture is not available for ${config.ideLabel}.`);
-      if (config.ideId === 'warp') {
-        summaryLines.push('If MCP config via file is not supported, configure MCP through Warp Drive UI.');
-      }
-      summaryLines.push('');
-      summaryLines.push('Next steps:');
-      summaryLines.push('  1. Start claude-mem worker: npx claude-mem start');
-      summaryLines.push(`  2. Restart ${config.ideLabel} to pick up the MCP server`);
-      summaryLines.push('');
-      process.stdout.write(`${summaryLines.join('\n')}\n`);
-
+      writeMcpConfigAndContext(config, configPath, mcpServerPath, skipWarpConfigWrite, contextPath);
       return 0;
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       logger.error('SYSTEM', 'MCP integration install failed', {
         ideId: config.ideId,
-        error: (error as Error).message,
+        error: message,
       });
-      process.stderr.write(`\nInstallation failed: ${(error as Error).message}\n`);
+      console.error(`\nInstallation failed: ${message}`);
       return 1;
     }
   };
+}
+
+function writeMcpConfigAndContext(
+  config: McpInstallerConfig,
+  configPath: string,
+  mcpServerPath: string,
+  skipWarpConfigWrite: boolean,
+  contextPath: string | undefined,
+): void {
+  if (skipWarpConfigWrite) {
+    console.log(`  Note: ~/.warp/ not found. MCP may need to be configured via Warp Drive UI.`);
+  } else {
+    writeMcpJsonConfig(configPath, mcpServerPath, config.configKey);
+    console.log(`  MCP config written to: ${configPath}`);
+  }
+
+  if (contextPath) {
+    injectContextIntoMarkdownFile(contextPath, PLACEHOLDER_CONTEXT);
+    console.log(`  Context placeholder written to: ${contextPath}`);
+  }
+
+  const summaryLines = [`\nInstallation complete!\n`];
+  summaryLines.push(`MCP config:  ${configPath}`);
+  if (contextPath) {
+    summaryLines.push(`Context:     ${contextPath}`);
+  }
+  summaryLines.push('');
+  summaryLines.push(`Note: This is an MCP-only integration providing search tools and context.`);
+  summaryLines.push(`Transcript capture is not available for ${config.ideLabel}.`);
+  if (config.ideId === 'warp') {
+    summaryLines.push('If MCP config via file is not supported, configure MCP through Warp Drive UI.');
+  }
+  summaryLines.push('');
+  summaryLines.push('Next steps:');
+  summaryLines.push('  1. Start claude-mem worker: npx claude-mem start');
+  summaryLines.push(`  2. Restart ${config.ideLabel} to pick up the MCP server`);
+  summaryLines.push('');
+  console.log(summaryLines.join('\n'));
 }
 
 // ============================================================================
@@ -283,53 +295,59 @@ export async function installGooseMcpIntegration(): Promise<number> {
     return 1;
   }
 
+  const configPath = getGooseConfigPath();
+  const configDirectory = path.dirname(configPath);
+
   try {
-    const configPath = getGooseConfigPath();
-    const configDirectory = path.dirname(configPath);
     mkdirSync(configDirectory, { recursive: true });
+    mergeGooseYamlConfig(configPath, mcpServerPath);
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`\nInstallation failed: ${message}`);
+    return 1;
+  }
+}
 
-    if (existsSync(configPath)) {
-      let yamlContent = readFileSync(configPath, 'utf-8');
+function mergeGooseYamlConfig(configPath: string, mcpServerPath: string): void {
+  if (existsSync(configPath)) {
+    let yamlContent = readFileSync(configPath, 'utf-8');
 
-      if (gooseConfigHasClaudeMemEntry(yamlContent)) {
-        // Already configured — replace the claude-mem block
-        // Find the claude-mem entry and replace it
-        const claudeMemPattern = /( {2}claude-mem:\n(?:.*\n)*?(?= {2}\S|\n\n|^\S|$))/m;
-        const newEntry = buildGooseClaudeMemEntryYaml(mcpServerPath) + '\n';
+    if (gooseConfigHasClaudeMemEntry(yamlContent)) {
+      const claudeMemPattern = /( {2}claude-mem:\n(?:.*\n)*?(?= {2}\S|\n\n|^\S|$))/m;
+      const newEntry = buildGooseClaudeMemEntryYaml(mcpServerPath) + '\n';
 
-        if (claudeMemPattern.test(yamlContent)) {
-          yamlContent = yamlContent.replace(claudeMemPattern, newEntry);
-        }
-        writeFileSync(configPath, yamlContent);
-        process.stdout.write(`  Updated existing claude-mem entry in: ${configPath}\n`);
-      } else if (yamlContent.includes('mcpServers:')) {
-        // mcpServers section exists but no claude-mem entry — append under it
-        const mcpServersIndex = yamlContent.indexOf('mcpServers:');
-        const insertionPoint = mcpServersIndex + 'mcpServers:'.length;
-        const newEntry = '\n' + buildGooseClaudeMemEntryYaml(mcpServerPath);
-
-        yamlContent =
-          yamlContent.slice(0, insertionPoint) +
-          newEntry +
-          yamlContent.slice(insertionPoint);
-
-        writeFileSync(configPath, yamlContent);
-        process.stdout.write(`  Added claude-mem to existing mcpServers in: ${configPath}\n`);
-      } else {
-        // No mcpServers section — append the entire block
-        const mcpBlock = '\n' + buildGooseMcpYamlBlock(mcpServerPath) + '\n';
-        yamlContent = yamlContent.trimEnd() + '\n' + mcpBlock;
-        writeFileSync(configPath, yamlContent);
-        process.stdout.write(`  Appended mcpServers section to: ${configPath}\n`);
+      if (!claudeMemPattern.test(yamlContent)) {
+        throw new Error('Found mcpServers/claude-mem markers but could not locate a replaceable claude-mem block');
       }
-    } else {
-      // File doesn't exist — create from template
-      const templateContent = buildGooseMcpYamlBlock(mcpServerPath) + '\n';
-      writeFileSync(configPath, templateContent);
-      process.stdout.write(`  Created config with MCP server: ${configPath}\n`);
-    }
+      yamlContent = yamlContent.replace(claudeMemPattern, newEntry);
+      writeFileSync(configPath, yamlContent);
+      process.stdout.write(`  Updated existing claude-mem entry in: ${configPath}\n`);
+    } else if (yamlContent.includes('mcpServers:')) {
+      const mcpServersIndex = yamlContent.indexOf('mcpServers:');
+      const insertionPoint = mcpServersIndex + 'mcpServers:'.length;
+      const newEntry = '\n' + buildGooseClaudeMemEntryYaml(mcpServerPath);
 
-    process.stdout.write(`
+      yamlContent =
+        yamlContent.slice(0, insertionPoint) +
+        newEntry +
+        yamlContent.slice(insertionPoint);
+
+      writeFileSync(configPath, yamlContent);
+      process.stdout.write(`  Added claude-mem to existing mcpServers in: ${configPath}\n`);
+    } else {
+      const mcpBlock = '\n' + buildGooseMcpYamlBlock(mcpServerPath) + '\n';
+      yamlContent = yamlContent.trimEnd() + '\n' + mcpBlock;
+      writeFileSync(configPath, yamlContent);
+      process.stdout.write(`  Appended mcpServers section to: ${configPath}\n`);
+    }
+  } else {
+    const templateContent = buildGooseMcpYamlBlock(mcpServerPath) + '\n';
+    writeFileSync(configPath, templateContent);
+    process.stdout.write(`  Created config with MCP server: ${configPath}\n`);
+  }
+
+  process.stdout.write(`
 Installation complete!
 
 MCP config:  ${configPath}
@@ -341,15 +359,6 @@ Next steps:
   1. Start claude-mem worker: npx claude-mem start
   2. Restart Goose to pick up the MCP server
 `);
-
-    return 0;
-  } catch (error) {
-    logger.error('SYSTEM', 'Goose MCP integration install failed', {
-      error: (error as Error).message,
-    });
-    process.stderr.write(`\nInstallation failed: ${(error as Error).message}\n`);
-    return 1;
-  }
 }
 
 // ============================================================================

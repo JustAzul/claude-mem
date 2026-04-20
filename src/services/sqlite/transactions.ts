@@ -68,9 +68,9 @@ export function storeObservationsAndMarkComplete(
     const obsStmt = db.prepare(`
       INSERT INTO observations
       (memory_session_id, project, type, title, subtitle, facts, narrative, concepts,
-       files_read, files_modified, prompt_number, discovery_tokens, content_hash, created_at, created_at_epoch,
+       files_read, files_modified, prompt_number, discovery_tokens, agent_type, agent_id, content_hash, created_at, created_at_epoch,
        why, alternatives_rejected, related_observation_ids)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const observation of observations) {
@@ -94,6 +94,8 @@ export function storeObservationsAndMarkComplete(
         JSON.stringify(observation.files_modified),
         promptNumber || null,
         discoveryTokens,
+        observation.agent_type ?? null,
+        observation.agent_id ?? null,
         contentHash,
         timestampIso,
         timestampEpoch,
@@ -193,9 +195,9 @@ export function storeObservations(
     const obsStmt = db.prepare(`
       INSERT INTO observations
       (memory_session_id, project, type, title, subtitle, facts, narrative, concepts,
-       files_read, files_modified, prompt_number, discovery_tokens, content_hash, created_at, created_at_epoch,
+       files_read, files_modified, prompt_number, discovery_tokens, agent_type, agent_id, content_hash, created_at, created_at_epoch,
        why, alternatives_rejected, related_observation_ids)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const observation of observations) {
@@ -219,6 +221,8 @@ export function storeObservations(
         JSON.stringify(observation.files_modified),
         promptNumber || null,
         discoveryTokens,
+        observation.agent_type ?? null,
+        observation.agent_id ?? null,
         contentHash,
         timestampIso,
         timestampEpoch,

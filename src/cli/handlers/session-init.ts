@@ -16,6 +16,27 @@ import { normalizePlatformSource } from '../../shared/platform-source.js';
 import { reportMemoryAssist } from './memory-assist-report.js';
 import { extractLastMessage } from '../../shared/transcript-parser.js';
 
+async function fetchSemanticContext(
+  prompt: string,
+  project: string,
+  limit: string,
+  sessionDbId: number
+): Promise<string> {
+  const semanticRes = await workerHttpRequest('/api/context/semantic', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ q: prompt, project, limit })
+  });
+  if (semanticRes.ok) {
+    const data = await semanticRes.json() as { context: string; count: number };
+    if (data.context) {
+      logger.debug('HOOK', `Semantic injection: ${data.count} observations for prompt`, { sessionId: sessionDbId, count: data.count });
+      return data.context;
+    }
+  }
+  return '';
+}
+
 export const sessionInitHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
     // Ensure worker is running before any other logic

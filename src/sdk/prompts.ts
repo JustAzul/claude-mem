@@ -6,6 +6,20 @@
 import { logger } from '../utils/logger.js';
 import type { ModeConfig } from '../services/domain/types.js';
 
+/**
+ * Marker string embedded in summary prompts — used by ResponseProcessor to detect
+ * whether the most recent user message was a summary request (enables observation→summary
+ * coercion for #1633). Keep in sync with buildSummaryPrompt below.
+ */
+export const SUMMARY_MODE_MARKER = 'MODE SWITCH: PROGRESS SUMMARY';
+
+/**
+ * Maximum consecutive summary failures before the circuit breaker opens.
+ * After this many failures, SessionManager.queueSummarize will skip further
+ * summarize requests to prevent the infinite retry loop (#1633).
+ */
+export const MAX_CONSECUTIVE_SUMMARY_FAILURES = 3;
+
 export interface Observation {
   id: number;
   tool_name: string;
@@ -160,19 +174,19 @@ export function buildObservationPrompt(obs: Observation, turnContext?: Observati
 
   try {
     toolInput = typeof obs.tool_input === 'string' ? JSON.parse(obs.tool_input) : obs.tool_input;
-  } catch (error) {
+  } catch (error: unknown) {
     logger.debug('SDK', 'Tool input is plain string, using as-is', {
       toolName: obs.tool_name
-    }, error as Error);
+    }, error instanceof Error ? error : new Error(String(error)));
     toolInput = obs.tool_input;
   }
 
   try {
     toolOutput = typeof obs.tool_output === 'string' ? JSON.parse(obs.tool_output) : obs.tool_output;
-  } catch (error) {
+  } catch (error: unknown) {
     logger.debug('SDK', 'Tool output is plain string, using as-is', {
       toolName: obs.tool_name
-    }, error as Error);
+    }, error instanceof Error ? error : new Error(String(error)));
     toolOutput = obs.tool_output;
   }
 
@@ -210,7 +224,11 @@ export function buildSummaryPrompt(session: SDKSession, mode: ModeConfig): strin
     return '';
   })();
 
-  return `--- MODE SWITCH: PROGRESS SUMMARY ---
+  return `--- ${SUMMARY_MODE_MARKER} ---
+⚠️ CRITICAL TAG REQUIREMENT — READ CAREFULLY:
+• You MUST wrap your ENTIRE response in <summary>...</summary> tags.
+• Do NOT use <observation> tags. <observation> output will be DISCARDED and cause a system error.
+• The ONLY accepted root tag is <summary>. Any other root tag is a protocol violation.
 
 ${mode.prompts.header_summary_checkpoint}
 ${mode.prompts.summary_instruction}
@@ -228,9 +246,8 @@ ${mode.prompts.summary_format_instruction}
   <notes>${mode.prompts.xml_summary_notes_placeholder}</notes>
 </summary>
 
-${mode.prompts.summary_footer}
-
-CRITICAL FORMAT RULE: Your output must contain ONLY the <summary>...</summary> block above. Do NOT use <observation> tags — this is a summary turn, not an observation turn. Any <observation> tag in your output will cause this entire summary to be silently discarded by the system.`;
+REMINDER: Your response MUST use <summary> as the root tag, NOT <observation>.
+${mode.prompts.summary_footer}`;
 }
 
 /**

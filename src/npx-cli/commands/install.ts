@@ -136,7 +136,8 @@ async function setupIDEs(selectedIDEs: string[]): Promise<string[]> {
             { stdio: 'inherit' },
           );
           log.success('Claude Code: plugin installed via CLI.');
-        } catch {
+        } catch (error: unknown) {
+          console.error('[install] Claude Code plugin install error:', error instanceof Error ? error.message : String(error));
           log.error('Claude Code: plugin install failed. Is `claude` CLI on your PATH?');
           failedIDEs.push(ideId);
         }
@@ -380,7 +381,8 @@ function runSmartInstall(): boolean {
       ...(IS_WINDOWS ? { shell: true as const } : {}),
     });
     return true;
-  } catch {
+  } catch (error: unknown) {
+    console.warn('[install] smart-install error:', error instanceof Error ? error.message : String(error));
     log.warn('smart-install encountered an issue. You may need to install Bun/uv manually.');
     return false;
   }
@@ -417,7 +419,8 @@ export async function runInstallCommand(options: InstallOptions = {}): Promise<v
         readFileSync(join(marketplaceDir, 'plugin', '.claude-plugin', 'plugin.json'), 'utf-8'),
       );
       log.warn(`Existing installation detected (v${existingPluginJson.version ?? 'unknown'}).`);
-    } catch {
+    } catch (error: unknown) {
+      console.warn('[install] Failed to read existing plugin version:', error instanceof Error ? error.message : String(error));
       log.warn('Existing installation detected.');
     }
 
@@ -506,7 +509,8 @@ export async function runInstallCommand(options: InstallOptions = {}): Promise<v
           try {
             runNpmInstallInMarketplace();
             return `Dependencies installed ${pc.green('OK')}`;
-          } catch {
+          } catch (error: unknown) {
+            console.warn('[install] npm install error:', error instanceof Error ? error.message : String(error));
             return `Dependencies may need manual install ${pc.yellow('!')}`;
           }
         },

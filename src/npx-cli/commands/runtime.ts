@@ -110,6 +110,44 @@ export function runStatusCommand(): void {
 }
 
 /**
+ * Stamp merged-worktree provenance on observations/summaries and keep Chroma
+ * metadata in lockstep. Delegates to the worker-service.cjs `adopt` subcommand
+ * so adoption runs in Bun (needed for bun:sqlite) while preserving the user's
+ * working directory — that's what the engine uses to locate the parent repo.
+ */
+export function runAdoptCommand(extraArgs: string[] = []): void {
+  ensureInstalledOrExit();
+  const bunPath = resolveBunOrExit();
+  const workerScript = workerServiceScriptPath();
+
+  if (!existsSync(workerScript)) {
+    console.error(pc.red(`Worker script not found at: ${workerScript}`));
+    console.error('The installation may be corrupted. Try: npx claude-mem install');
+    process.exit(1);
+  }
+
+  // Pass user's cwd explicitly via --cwd because we override cwd on spawn to
+  // marketplaceDirectory() (required for the worker's own file resolution).
+  const userCwd = process.cwd();
+  const args = [workerScript, 'adopt', '--cwd', userCwd, ...extraArgs];
+
+  const child = spawn(bunPath, args, {
+    stdio: 'inherit',
+    cwd: marketplaceDirectory(),
+    env: process.env,
+  });
+
+  child.on('error', (error) => {
+    console.error(pc.red(`Failed to start Bun: ${error.message}`));
+    process.exit(1);
+  });
+
+  child.on('close', (exitCode) => {
+    process.exit(exitCode ?? 0);
+  });
+}
+
+/**
  * Search the worker API at `GET /api/search?query=<query>`.
  */
 export async function runSearchCommand(queryParts: string[]): Promise<void> {
@@ -124,34 +162,44 @@ export async function runSearchCommand(queryParts: string[]): Promise<void> {
   const workerPort = process.env.CLAUDE_MEM_WORKER_PORT || '37777';
   const searchUrl = `http://127.0.0.1:${workerPort}/api/search?query=${encodeURIComponent(query)}`;
 
+  let response: Response;
   try {
-    const response = await fetch(searchUrl);
-
-    if (!response.ok) {
-      if (response.status === 404) {
-        writeStderr(pc.red('Search endpoint not found. Is the worker running?'));
-        writeStderr(`Try: ${pc.bold('npx claude-mem start')}`);
-        process.exit(1);
-      }
-      writeStderr(pc.red(`Search failed: HTTP ${response.status}`));
+    response = await fetch(searchUrl);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    const cause = error instanceof Error ? (error as any).cause : undefined;
+    if (cause?.code === 'ECONNREFUSED' || message.includes('ECONNREFUSED')) {
+      console.error(pc.red('Worker is not running.'));
+      console.error(`Start it with: ${pc.bold('npx claude-mem start')}`);
       process.exit(1);
     }
-
-    const data = await response.json();
-
-    if (typeof data === 'object' && data !== null) {
-      writeStdout(JSON.stringify(data, null, 2));
-    } else {
-      writeStdout(String(data));
-    }
-  } catch (error: any) {
-    if (error?.cause?.code === 'ECONNREFUSED' || error?.message?.includes('ECONNREFUSED')) {
-      writeStderr(pc.red('Worker is not running.'));
-      writeStderr(`Start it with: ${pc.bold('npx claude-mem start')}`);
-      process.exit(1);
-    }
-    writeStderr(pc.red(`Search failed: ${error.message}`));
+    console.error(pc.red(`Search failed: ${message}`));
     process.exit(1);
+  }
+
+  if (!response.ok) {
+    if (response.status === 404) {
+      console.error(pc.red('Search endpoint not found. Is the worker running?'));
+      console.error(`Try: ${pc.bold('npx claude-mem start')}`);
+      process.exit(1);
+    }
+    console.error(pc.red(`Search failed: HTTP ${response.status}`));
+    process.exit(1);
+  }
+
+  let data: unknown;
+  try {
+    data = await response.json();
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(pc.red(`Search failed: invalid JSON response (${message})`));
+    process.exit(1);
+  }
+
+  if (typeof data === 'object' && data !== null) {
+    console.log(JSON.stringify(data, null, 2));
+  } else {
+    console.log(data);
   }
 }
 
