@@ -21,6 +21,13 @@ export function extractToolMetadata(toolName: string, rawToolInput: unknown): To
   const input = normalizeToolInput(rawToolInput);
 
   switch (toolName) {
+    case '__init__':
+      return {
+        files_read: [],
+        files_modified: [],
+        type_override: 'discovery',
+      };
+
     case 'Read': {
       const filePath = getStringField(input, 'file_path');
       return {
