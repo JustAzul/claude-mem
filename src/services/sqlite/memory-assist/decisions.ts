@@ -305,8 +305,12 @@ export function getMemoryAssistDecisionsForPrompt(
   withinMs: number,
   referenceEpoch: number = Date.now()
 ): MemoryAssistDecisionRecord[] {
+  // Unidirectional past window: decisions are always written before the
+  // signal that resolves them, so only past rows are candidates. Previously
+  // a symmetric [ref-withinMs, ref+withinMs] window doubled the effective
+  // span (e.g., 15min passed from the caller became 30min), raising the
+  // risk of cross-prompt collisions on rapid re-prompting.
   const sinceEpoch = referenceEpoch - withinMs;
-  const untilEpoch = referenceEpoch + withinMs;
   const rows = db.prepare(`
     SELECT *
     FROM memory_assist_decisions
@@ -315,7 +319,7 @@ export function getMemoryAssistDecisionsForPrompt(
       AND created_at_epoch >= ?
       AND created_at_epoch <= ?
     ORDER BY created_at_epoch DESC
-  `).all(contentSessionId, promptNumber, sinceEpoch, untilEpoch) as DecisionRow[];
+  `).all(contentSessionId, promptNumber, sinceEpoch, referenceEpoch) as DecisionRow[];
 
   return rows.map(hydrateDecision);
 }

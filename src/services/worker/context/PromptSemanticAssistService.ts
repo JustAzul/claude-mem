@@ -173,7 +173,15 @@ export class PromptSemanticAssistService {
 
       if (docType === 'session_summary') {
         const summaryIds = selectedCandidates.map(c => Number(c.id)).filter(n => Number.isFinite(n) && n > 0);
-        const summaries = this.sessionStore.getSessionSummariesByIds(summaryIds, { orderBy: 'date_desc' }).slice(0, limit);
+        // Preserve Chroma distance ranking: the repository orders by
+        // date_desc, but we want the closest semantic matches first so
+        // slice-to-limit keeps the top-ranked hits, not the most recent.
+        const rankByCandidate = new Map(summaryIds.map((id, idx) => [id, idx]));
+        const summaries = this.sessionStore
+          .getSessionSummariesByIds(summaryIds, { orderBy: 'date_desc' })
+          .slice()
+          .sort((a, b) => (rankByCandidate.get(a.id) ?? 0) - (rankByCandidate.get(b.id) ?? 0))
+          .slice(0, limit);
 
         if (summaries.length === 0) {
           logger.warn('[PromptSemanticAssistService] skipped summary recall: hydration miss');

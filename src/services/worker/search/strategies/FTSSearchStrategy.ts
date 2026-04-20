@@ -48,7 +48,13 @@ export function sanitizeFTSQuery(raw: string): string {
   // Remove characters that break FTS5 MATCH syntax
   const stripped = raw.replace(/["():*\-^]/g, ' ');
   const tokens = stripped.split(/\s+/).filter(t => t.length > 0);
-  if (tokens.length === 0) return '';
+  if (tokens.length === 0) {
+    // Silent empty returns here were indistinguishable from "no matches" —
+    // surface it so callers can log / fall back instead of misreading empty
+    // results as a BM25 miss.
+    logger.warn('SEARCH', 'sanitizeFTSQuery: all tokens stripped, query is effectively empty', { raw });
+    return '';
+  }
   return tokens.map(t => `"${t}"`).join(' OR ');
 }
 
