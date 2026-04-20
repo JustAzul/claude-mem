@@ -941,12 +941,18 @@ export class WorkerService {
 
         logger.info('SYSTEM', `Marked ${ids.length} stale sessions as failed`);
 
+        // Grace window: don't sweep messages that arrived in the last 30s — a
+        // fresh enqueue from a "stale" session (which may have just become
+        // stale by threshold while a prompt was in-flight) would otherwise be
+        // dropped before the worker had a chance to process it.
+        const STALE_MSG_GRACE_MS = 30_000;
         const msgResult = sessionStore.db.prepare(`
           UPDATE pending_messages
           SET status = 'failed', failed_at_epoch = ?
           WHERE status = 'pending'
           AND session_db_id IN (${placeholders})
-        `).run(Date.now(), ...ids);
+          AND created_at_epoch < ?
+        `).run(Date.now(), ...ids, Date.now() - STALE_MSG_GRACE_MS);
 
         if (msgResult.changes > 0) {
           logger.info('SYSTEM', `Marked ${msgResult.changes} pending messages from stale sessions as failed`);

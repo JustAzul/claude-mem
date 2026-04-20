@@ -121,8 +121,10 @@ export class MultiSignalSearchStrategy extends BaseSearchStrategy implements Sea
 
     if (chromaFailed && !ftsFailed) {
       logger.warn('SEARCH', 'MultiSignalSearchStrategy: Chroma failed, returning FTS-only results', {});
+      const fts = ftsResult as StrategySearchResult;
       return {
-        ...(ftsResult as StrategySearchResult),
+        ...fts,
+        results: { ...fts.results, observations: fts.results.observations.slice(0, limit) },
         strategy: 'multi_signal',
         usedChroma: false,
         usedFTS: true,
@@ -132,8 +134,10 @@ export class MultiSignalSearchStrategy extends BaseSearchStrategy implements Sea
 
     if (!chromaFailed && ftsFailed) {
       logger.warn('SEARCH', 'MultiSignalSearchStrategy: FTS failed, returning Chroma-only results', {});
+      const sem = semanticResult as StrategySearchResult;
       return {
-        ...(semanticResult as StrategySearchResult),
+        ...sem,
+        results: { ...sem.results, observations: sem.results.observations.slice(0, limit) },
         strategy: 'multi_signal',
         usedChroma: true,
         usedFTS: false,

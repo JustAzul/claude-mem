@@ -367,30 +367,26 @@ export class PendingMessageStore {
    * Otherwise marks as 'failed' permanently
    */
   markFailed(messageId: number): void {
-    const now = Date.now();
+    // Atomic CAS: increment retry_count only if strictly below cap. Avoids
+    // read-then-write race where two workers see retry_count = maxRetries - 1
+    // and both write retry_count = maxRetries (bypassing the cap by 1).
+    const retryStmt = this.db.prepare(`
+      UPDATE pending_messages
+      SET status = 'pending', retry_count = retry_count + 1, started_processing_at_epoch = NULL
+      WHERE id = ? AND retry_count < ?
+    `);
+    const result = retryStmt.run(messageId, this.maxRetries);
 
-    // Get current retry count
-    const msg = this.db.prepare('SELECT retry_count FROM pending_messages WHERE id = ?').get(messageId) as { retry_count: number } | undefined;
+    if (result.changes > 0) return;
 
-    if (!msg) return;
-
-    if (msg.retry_count < this.maxRetries) {
-      // Move back to pending for retry
-      const stmt = this.db.prepare(`
-        UPDATE pending_messages
-        SET status = 'pending', retry_count = retry_count + 1, started_processing_at_epoch = NULL
-        WHERE id = ?
-      `);
-      stmt.run(messageId);
-    } else {
-      // Max retries exceeded, mark as permanently failed
-      const stmt = this.db.prepare(`
-        UPDATE pending_messages
-        SET status = 'failed', completed_at_epoch = ?
-        WHERE id = ?
-      `);
-      stmt.run(now, messageId);
-    }
+    // Either the row is missing or retry_count already >= maxRetries.
+    // Mark permanently failed (idempotent if row is missing).
+    const failStmt = this.db.prepare(`
+      UPDATE pending_messages
+      SET status = 'failed', completed_at_epoch = ?
+      WHERE id = ?
+    `);
+    failStmt.run(Date.now(), messageId);
   }
 
   /**
