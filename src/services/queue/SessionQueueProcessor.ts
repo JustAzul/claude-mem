@@ -4,12 +4,15 @@ import type { PendingMessageWithId } from '../worker-types.js';
 import { logger } from '../../utils/logger.js';
 
 const IDLE_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes
+const DEFAULT_SETTLING_WINDOW_MS = 800;
 
 export interface CreateIteratorOptions {
   sessionDbId: number;
   signal: AbortSignal;
   /** Called when idle timeout occurs - should trigger abort to kill subprocess */
   onIdleTimeout?: () => void;
+  /** Milliseconds to wait after first message arrives, letting bursts accumulate (default: 800) */
+  settlingWindowMs?: number;
 }
 
 export class SessionQueueProcessor {
@@ -30,7 +33,7 @@ export class SessionQueueProcessor {
    * Just returning from the iterator is NOT enough - the subprocess stays alive!
    */
   async *createIterator(options: CreateIteratorOptions): AsyncIterableIterator<PendingMessageWithId> {
-    const { sessionDbId, signal, onIdleTimeout } = options;
+    const { sessionDbId, signal, onIdleTimeout, settlingWindowMs = DEFAULT_SETTLING_WINDOW_MS } = options;
     let lastActivityTime = Date.now();
 
     while (!signal.aborted) {
@@ -48,27 +51,39 @@ export class SessionQueueProcessor {
       }
 
       if (persistentMessage) {
-        // Reset activity time when we successfully yield a message
         lastActivityTime = Date.now();
-        // Yield the message for processing (it's marked as 'processing' in DB)
         yield this.toPendingMessageWithId(persistentMessage);
         continue;
       }
 
-      // Wait phase: queue empty - wait for wake-up event or timeout
+      // Wait phase: queue empty — wait for wake-up event or idle timeout
       try {
         const idleTimedOut = await this.handleWaitPhase(signal, lastActivityTime, sessionDbId, onIdleTimeout);
         if (idleTimedOut) return;
-        // Reset timer on spurious wakeup if not timed out
+
+        // Settling window: give a burst of rapid tool calls time to accumulate
+        // before claiming, so SDKAgent can drain several at once into one batch prompt
+        if (settlingWindowMs > 0 && !signal.aborted) {
+          logger.debug('QUEUE', `SETTLING | sessionDbId=${sessionDbId} | windowMs=${settlingWindowMs}`);
+          await this.settleDelay(settlingWindowMs, signal);
+        }
+
         lastActivityTime = Date.now();
       } catch (error) {
         if (signal.aborted) return;
         const normalizedError = error instanceof Error ? error : new Error(String(error));
         logger.error('QUEUE', 'Error waiting for message', { sessionDbId }, normalizedError);
-        // Small backoff to prevent tight loop on error
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
+  }
+
+  private settleDelay(ms: number, signal: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      const onAbort = () => { clearTimeout(timer); resolve(); };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   private toPendingMessageWithId(msg: PersistentPendingMessage): PendingMessageWithId {

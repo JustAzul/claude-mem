@@ -14,7 +14,7 @@ import path from 'path';
 import { DatabaseManager } from './DatabaseManager.js';
 import { SessionManager } from './SessionManager.js';
 import { logger } from '../../utils/logger.js';
-import { buildInitPrompt, buildObservationPrompt, buildSummaryPrompt, buildContinuationPrompt } from '../../sdk/prompts.js';
+import { buildInitPrompt, buildObservationPrompt, buildBatchObservationPrompt, buildSummaryPrompt, buildContinuationPrompt } from '../../sdk/prompts.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
 import { USER_SETTINGS_PATH, OBSERVER_SESSIONS_DIR, ensureDir } from '../../shared/paths.js';
 import { buildIsolatedEnv, getAuthMethodDescription } from '../../shared/EnvManager.js';
@@ -28,6 +28,8 @@ import { sanitizeEnv } from '../../supervisor/env-sanitizer.js';
 // Import Agent SDK (assumes it's installed)
 // @ts-ignore - Agent SDK types may not be available
 import { query } from '@anthropic-ai/claude-agent-sdk';
+
+const OBSERVATION_BATCH_LIMIT = 5;
 
 function extractFilesFromToolInput(toolName: string, toolInput: unknown): string[] {
   if (!toolInput || typeof toolInput !== 'object') return [];
@@ -377,6 +379,11 @@ export class SDKAgent {
     // Add to shared conversation history for provider interop
     session.conversationHistory.push({ role: 'user', content: initPrompt });
 
+    // Mark init/continuation turns as discovery so ResponseProcessor's type override
+    // fires even though there is no preceding tool call to derive context from.
+    // Without this, the LLM can infer 'refactor' or 'bugfix' from code it merely read.
+    toolContextTracker.current = { tool_name: '__init__', tool_input: null };
+
     // Yield initial user prompt with context (or continuation if prompt #2+)
     // CRITICAL: Both paths use session.contentSessionId from the hook
     yield {
@@ -409,60 +416,108 @@ export class SDKAgent {
       }
 
       if (message.type === 'observation') {
-        // Update last prompt number
-        if (message.prompt_number !== undefined) {
-          session.lastPromptNumber = message.prompt_number;
+        // Drain additional pending observations so a burst of reads becomes one API call
+        const additional = this.sessionManager.tryClaimAdditionalObservations(
+          session.sessionDbId,
+          OBSERVATION_BATCH_LIMIT - 1
+        );
+        const allObservations = [message, ...additional];
+
+        for (const obs of additional) {
+          session.processingMessageIds.push(obs._persistentId);
         }
 
-        const files = extractFilesFromToolInput(
-          message.tool_name ?? '',
-          message.tool_input
-        );
-        const priorObservations = files.length > 0
-          ? this.dbManager.getSessionStore().getPriorObservationsForFiles(
-              files,
-              message._originalTimestamp,
-              3
-            )
-          : [];
+        let obsPrompt: string;
 
-        const obsPrompt = buildObservationPrompt({
-          id: 0, // Not used in prompt
-          tool_name: message.tool_name!,
-          tool_input: JSON.stringify(message.tool_input),
-          tool_output: JSON.stringify(message.tool_response),
-          created_at_epoch: Date.now(),
-          cwd: message.cwd
-        }, {
-          userRequest: session.userPrompt ?? null,
-          priorAssistantMessage: message.last_assistant_message ?? null,
-          priorObservations,
-        });
+        if (allObservations.length > 1) {
+          // Batch path: combine N observations into one prompt → one API call
+          const batchItems = allObservations.map(obs => {
+            const files = extractFilesFromToolInput(obs.tool_name ?? '', obs.tool_input);
+            const priorObservations = files.length > 0
+              ? this.dbManager.getSessionStore().getPriorObservationsForFiles(files, obs._originalTimestamp, 3)
+              : [];
+            return {
+              obs: {
+                id: 0,
+                tool_name: obs.tool_name!,
+                tool_input: JSON.stringify(obs.tool_input),
+                tool_output: JSON.stringify(obs.tool_response),
+                created_at_epoch: obs._originalTimestamp,
+                cwd: obs.cwd
+              },
+              turnContext: {
+                userRequest: session.userPrompt ?? null,
+                priorAssistantMessage: obs.last_assistant_message ?? null,
+                priorObservations
+              }
+            };
+          });
 
-        // Record tool context so processAgentResponse can override LLM-inferred metadata.
-        // Set immediately before yield so it is current when the SDK response is handled.
-        toolContextTracker.current = {
-          tool_name: message.tool_name!,
-          tool_input: message.tool_input,
-        };
+          const lastObs = allObservations[allObservations.length - 1];
+          if (lastObs.prompt_number !== undefined) {
+            session.lastPromptNumber = lastObs.prompt_number;
+          }
+          if (lastObs.cwd) cwdTracker.lastCwd = lastObs.cwd;
 
-        // Record capture snapshot source so V30 snapshot rows can pair raw inputs
-        // with captured outputs. Tool input/output may arrive as either a parsed
-        // object (fresh enqueue path) or a string (double-serialized legacy rows),
-        // so stringify objects but pass strings through verbatim.
-        captureSourceTracker.current = {
-          memorySessionId: session.memorySessionId,
-          contentSessionId: session.contentSessionId,
-          promptNumber: session.lastPromptNumber,
-          userPrompt: session.userPrompt ?? null,
-          priorAssistantMessage: message.last_assistant_message ?? null,
-          toolName: message.tool_name ?? null,
-          toolInput: toSnapshotString(message.tool_input),
-          toolOutput: toSnapshotString(message.tool_response),
-          cwd: message.cwd ?? null,
-        };
+          session.pendingAgentId = lastObs.agentId ?? null;
+          session.pendingAgentType = lastObs.agentType ?? null;
 
-        // Add to shared conversation history for provider interop
+          toolContextTracker.current = { tool_name: lastObs.tool_name!, tool_input: lastObs.tool_input };
+          captureSourceTracker.current = {
+            memorySessionId: session.memorySessionId,
+            contentSessionId: session.contentSessionId,
+            promptNumber: session.lastPromptNumber,
+            userPrompt: session.userPrompt ?? null,
+            priorAssistantMessage: lastObs.last_assistant_message ?? null,
+            toolName: lastObs.tool_name ?? null,
+            toolInput: toSnapshotString(lastObs.tool_input),
+            toolOutput: toSnapshotString(lastObs.tool_response),
+            cwd: lastObs.cwd ?? null,
+          };
+
+          obsPrompt = buildBatchObservationPrompt(batchItems);
+        } else {
+          // Single observation path (existing behavior)
+          if (message.prompt_number !== undefined) {
+            session.lastPromptNumber = message.prompt_number;
+          }
+
+          const files = extractFilesFromToolInput(message.tool_name ?? '', message.tool_input);
+          const priorObservations = files.length > 0
+            ? this.dbManager.getSessionStore().getPriorObservationsForFiles(files, message._originalTimestamp, 3)
+            : [];
+
+          obsPrompt = buildObservationPrompt({
+            id: 0,
+            tool_name: message.tool_name!,
+            tool_input: JSON.stringify(message.tool_input),
+            tool_output: JSON.stringify(message.tool_response),
+            created_at_epoch: message._originalTimestamp,
+            cwd: message.cwd
+          }, {
+            userRequest: session.userPrompt ?? null,
+            priorAssistantMessage: message.last_assistant_message ?? null,
+            priorObservations,
+          });
+
+          toolContextTracker.current = {
+            tool_name: message.tool_name!,
+            tool_input: message.tool_input,
+          };
+
+          captureSourceTracker.current = {
+            memorySessionId: session.memorySessionId,
+            contentSessionId: session.contentSessionId,
+            promptNumber: session.lastPromptNumber,
+            userPrompt: session.userPrompt ?? null,
+            priorAssistantMessage: message.last_assistant_message ?? null,
+            toolName: message.tool_name ?? null,
+            toolInput: toSnapshotString(message.tool_input),
+            toolOutput: toSnapshotString(message.tool_response),
+            cwd: message.cwd ?? null,
+          };
+        }
+
         session.conversationHistory.push({ role: 'user', content: obsPrompt });
 
         yield {

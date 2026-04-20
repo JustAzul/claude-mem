@@ -376,6 +376,24 @@ export class SessionManager {
   }
 
   /**
+   * Synchronously drain additional pending observations for batch prompt construction.
+   * Returns up to maxItems observation messages that are immediately available.
+   * Stops at the first non-observation type (e.g. summarize) to preserve ordering.
+   */
+  tryClaimAdditionalObservations(sessionDbId: number, maxItems: number): PendingMessageWithId[] {
+    if (maxItems <= 0) return [];
+
+    const store = this.getPendingStore();
+    const msgs = store.claimObservationBatch(sessionDbId, maxItems);
+
+    return msgs.map(msg => ({
+      ...store.toPendingMessage(msg),
+      _persistentId: msg.id,
+      _originalTimestamp: msg.created_at_epoch
+    }));
+  }
+
+  /**
    * Delete a session (abort SDK agent and cleanup)
    * Verifies subprocess exit to prevent zombie process accumulation (Issue #737)
    */

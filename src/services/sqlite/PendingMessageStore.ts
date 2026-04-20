@@ -145,6 +145,31 @@ export class PendingMessageStore {
   }
 
   /**
+   * Claim a consecutive run of observation-type messages for batching.
+   * Stops at the first non-observation or when maxItems is reached.
+   * A non-observation that interrupts a partial batch is reset to pending.
+   */
+  claimObservationBatch(sessionDbId: number, maxItems: number): PersistentPendingMessage[] {
+    const results: PersistentPendingMessage[] = [];
+
+    for (let i = 0; i < maxItems; i++) {
+      const msg = this.claimNextMessage(sessionDbId);
+      if (!msg) break;
+
+      if (msg.message_type !== 'observation') {
+        this.db.prepare(
+          `UPDATE pending_messages SET status = 'pending', started_processing_at_epoch = NULL WHERE id = ?`
+        ).run(msg.id);
+        break;
+      }
+
+      results.push(msg);
+    }
+
+    return results;
+  }
+
+  /**
    * Confirm a message was successfully processed - DELETE it from the queue.
    * CRITICAL: Only call this AFTER the observation/summary has been stored to DB.
    * This prevents message loss on generator crash.

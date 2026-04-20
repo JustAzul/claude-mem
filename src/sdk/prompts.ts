@@ -158,17 +158,14 @@ function renderTurnContextField(raw: string | null | undefined, max: number): st
   return escapeXml(truncateWithSuffix(redactSecrets(raw), max));
 }
 
-/**
- * Build prompt to send tool observation to SDK agent
- *
- * turnContext threads the per-turn user intent + prior assistant message into
- * every per-observation prompt. An audit (intent_fit 0.40, 80% ceiling) showed
- * the capture LLM couldn't align observations with user intent because it only
- * saw the tool call in isolation. Without turnContext, the fields render as
- * "(not available)" so legacy callers still work.
- */
-export function buildObservationPrompt(obs: Observation, turnContext?: ObservationTurnContext): string {
-  // Safely parse tool_input and tool_output - they're already JSON strings
+const OBS_RETURN_INSTRUCTION = `Return either one or more <observation>...</observation> blocks, or an empty response if this tool use should be skipped.
+Concrete debugging findings from logs, queue state, database rows, session routing, or code-path inspection count as durable discoveries and should be recorded.
+Never reply with prose such as "Skipping", "No substantive tool executions", or any explanation outside XML. Non-XML text is discarded.`;
+
+const BATCH_OBS_RETURN_INSTRUCTION = `For each event above, return one or more <observation>...</observation> blocks if it contains durable information worth remembering, or omit it entirely if it has no lasting value.
+Concrete debugging findings from logs, queue state, database rows, session routing, or code-path inspection count. Never reply with prose outside XML. Non-XML text is discarded.`;
+
+function buildObservationBlock(obs: Observation, turnContext?: ObservationTurnContext): string {
   let toolInput: any;
   let toolOutput: any;
 
@@ -193,24 +190,44 @@ export function buildObservationPrompt(obs: Observation, turnContext?: Observati
   const userRequestBlock = renderTurnContextField(turnContext?.userRequest, 500);
   const priorAssistantBlock = renderTurnContextField(turnContext?.priorAssistantMessage, 300);
 
-  const base = `<observed_from_primary_session>
+  const block = `<observed_from_primary_session>
   <user_request>${userRequestBlock}</user_request>
   <prior_assistant_message>${priorAssistantBlock}</prior_assistant_message>
   <what_happened>${obs.tool_name}</what_happened>
   <occurred_at>${new Date(obs.created_at_epoch).toISOString()}</occurred_at>${obs.cwd ? `\n  <working_directory>${obs.cwd}</working_directory>` : ''}
   <parameters>${JSON.stringify(toolInput, null, 2)}</parameters>
   <outcome>${JSON.stringify(toolOutput, null, 2)}</outcome>
-</observed_from_primary_session>
-
-Return either one or more <observation>...</observation> blocks, or an empty response if this tool use should be skipped.
-Concrete debugging findings from logs, queue state, database rows, session routing, or code-path inspection count as durable discoveries and should be recorded.
-Never reply with prose such as "Skipping", "No substantive tool executions", or any explanation outside XML. Non-XML text is discarded.`;
+</observed_from_primary_session>`;
 
   if (turnContext?.priorObservations?.length) {
-    return base + `\n\nPRIOR_OBSERVATIONS_ON_SAME_FILES (chronological, what was done to these files before this action):\n` +
+    return block + `\n\nPRIOR_OBSERVATIONS_ON_SAME_FILES (chronological, what was done to these files before this action):\n` +
       turnContext.priorObservations.join('\n');
   }
-  return base;
+
+  return block;
+}
+
+/**
+ * Build prompt to send tool observation to SDK agent
+ *
+ * turnContext threads the per-turn user intent + prior assistant message into
+ * every per-observation prompt. An audit (intent_fit 0.40, 80% ceiling) showed
+ * the capture LLM couldn't align observations with user intent because it only
+ * saw the tool call in isolation. Without turnContext, the fields render as
+ * "(not available)" so legacy callers still work.
+ */
+export function buildObservationPrompt(obs: Observation, turnContext?: ObservationTurnContext): string {
+  return buildObservationBlock(obs, turnContext) + '\n\n' + OBS_RETURN_INSTRUCTION;
+}
+
+export interface BatchObservationItem {
+  obs: Observation;
+  turnContext?: ObservationTurnContext;
+}
+
+export function buildBatchObservationPrompt(items: BatchObservationItem[]): string {
+  const blocks = items.map(({ obs, turnContext }) => buildObservationBlock(obs, turnContext));
+  return blocks.join('\n\n---\n\n') + '\n\n' + BATCH_OBS_RETURN_INSTRUCTION;
 }
 
 /**
