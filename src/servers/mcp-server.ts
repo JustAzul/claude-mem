@@ -31,7 +31,7 @@ import { ensureWorkerStarted } from '../services/worker-spawner.js';
 import { searchCodebase, formatSearchResults } from '../services/smart-file-read/search.js';
 import { parseFile, formatFoldedView, unfoldSymbol } from '../services/smart-file-read/parser.js';
 import { readFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DB_PATH } from '../shared/paths.js';
@@ -419,15 +419,27 @@ NEVER fetch full details without filtering first. 10x token savings.`,
     },
     handler: async (args: any) => {
       const filePath = resolve(args.file_path);
-      const content = await readFile(filePath, 'utf-8');
-      const unfolded = unfoldSymbol(content, filePath, args.symbol_name);
+      let realFilePath: string;
+      try {
+        realFilePath = realpathSync(filePath);
+      } catch {
+        realFilePath = filePath;
+      }
+
+      const cwd = process.cwd();
+      if (!realFilePath.startsWith(cwd + '/') && realFilePath !== cwd) {
+        return { content: [{ type: 'text' as const, text: `Access denied: path must be within the workspace (${cwd})` }] };
+      }
+
+      const content = await readFile(realFilePath, 'utf-8');
+      const unfolded = unfoldSymbol(content, realFilePath, args.symbol_name);
       if (unfolded) {
         return {
           content: [{ type: 'text' as const, text: unfolded }]
         };
       }
       // Symbol not found — show available symbols
-      const parsed = parseFile(content, filePath);
+      const parsed = parseFile(content, realFilePath);
       if (parsed.symbols.length > 0) {
         const available = parsed.symbols.map(s => `  - ${s.name} (${s.kind})`).join('\n');
         return {
@@ -460,8 +472,20 @@ NEVER fetch full details without filtering first. 10x token savings.`,
     },
     handler: async (args: any) => {
       const filePath = resolve(args.file_path);
-      const content = await readFile(filePath, 'utf-8');
-      const parsed = parseFile(content, filePath);
+      let realFilePath: string;
+      try {
+        realFilePath = realpathSync(filePath);
+      } catch {
+        realFilePath = filePath;
+      }
+
+      const cwd = process.cwd();
+      if (!realFilePath.startsWith(cwd + '/') && realFilePath !== cwd) {
+        return { content: [{ type: 'text' as const, text: `Access denied: path must be within the workspace (${cwd})` }] };
+      }
+
+      const content = await readFile(realFilePath, 'utf-8');
+      const parsed = parseFile(content, realFilePath);
       if (parsed.symbols.length > 0) {
         return {
           content: [{ type: 'text' as const, text: formatFoldedView(parsed) }]

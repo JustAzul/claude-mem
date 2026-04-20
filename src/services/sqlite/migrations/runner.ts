@@ -949,59 +949,74 @@ export class MigrationRunner {
       "SELECT name FROM sqlite_master WHERE type='table' AND name='observations_fts'"
     ).all() as { name: string }[]).length > 0;
 
-    try {
-      if (!hasFTSTable) {
-        // Create the FTS5 external-content virtual table
-        this.db.run(`
-          CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
-            title, subtitle, narrative, text, facts, concepts,
-            content='observations', content_rowid='id',
-            tokenize='porter unicode61'
-          )
-        `);
+    if (hasFTSTable) {
+      const v28Applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(28) as SchemaVersion | undefined;
 
-        // INSERT trigger
-        this.db.run(`
-          CREATE TRIGGER IF NOT EXISTS observations_ai AFTER INSERT ON observations BEGIN
-            INSERT INTO observations_fts(rowid, title, subtitle, narrative, text, facts, concepts)
-            VALUES (new.id, new.title, new.subtitle, new.narrative, new.text, new.facts, new.concepts);
-          END
-        `);
-
-        // DELETE trigger
-        this.db.run(`
-          CREATE TRIGGER IF NOT EXISTS observations_ad AFTER DELETE ON observations BEGIN
-            INSERT INTO observations_fts(observations_fts, rowid, title, subtitle, narrative, text, facts, concepts)
-            VALUES('delete', old.id, old.title, old.subtitle, old.narrative, old.text, old.facts, old.concepts);
-          END
-        `);
-
-        // UPDATE trigger
-        this.db.run(`
-          CREATE TRIGGER IF NOT EXISTS observations_au AFTER UPDATE ON observations BEGIN
-            INSERT INTO observations_fts(observations_fts, rowid, title, subtitle, narrative, text, facts, concepts)
-            VALUES('delete', old.id, old.title, old.subtitle, old.narrative, old.text, old.facts, old.concepts);
-            INSERT INTO observations_fts(rowid, title, subtitle, narrative, text, facts, concepts)
-            VALUES (new.id, new.title, new.subtitle, new.narrative, new.text, new.facts, new.concepts);
-          END
-        `);
-
-        // Backfill existing rows using 'rebuild' — required for external-content FTS5 to
-        // tokenize source-table content correctly. Direct INSERT only registers rowid mappings
-        // but does not build token index; 'rebuild' reads from content='observations' and
-        // tokenizes every row. Safe to call once on table creation; triggers handle future syncs.
-        this.db.run("INSERT INTO observations_fts(observations_fts) VALUES('rebuild')");
-
-        logger.debug('DB', 'Created observations_fts virtual table, sync triggers, and backfilled existing rows');
+      if (v28Applied) {
+        logger.debug('DB', 'V28: observations_fts already present and recorded — skipping');
+        return;
       }
 
-    } catch (ftsError) {
-      logger.warn('DB', 'FTS5 not available, observations_fts index skipped', {}, ftsError as Error);
+      // Table exists but rebuild never completed (prior boot crashed between table
+      // creation and rebuild). Retry rebuild only — triggers were created before the crash.
+      try {
+        this.db.run("INSERT INTO observations_fts(observations_fts) VALUES('rebuild')");
+        this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(28, new Date().toISOString());
+        logger.debug('DB', 'V28: FTS table existed; completed deferred rebuild and recorded version');
+      } catch (rebuildError) {
+        logger.error('DB', 'FTS5 rebuild retry failed — BM25 search over pre-migration rows unavailable', {}, rebuildError as Error);
+      }
+      return;
     }
 
-    // Record migration regardless of FTS availability
-    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(28, new Date().toISOString());
-    logger.debug('DB', 'Observations FTS5 index ensured');
+    try {
+      // Create the FTS5 external-content virtual table
+      this.db.run(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
+          title, subtitle, narrative, text, facts, concepts,
+          content='observations', content_rowid='id',
+          tokenize='porter unicode61'
+        )
+      `);
+
+      // INSERT trigger
+      this.db.run(`
+        CREATE TRIGGER IF NOT EXISTS observations_ai AFTER INSERT ON observations BEGIN
+          INSERT INTO observations_fts(rowid, title, subtitle, narrative, text, facts, concepts)
+          VALUES (new.id, new.title, new.subtitle, new.narrative, new.text, new.facts, new.concepts);
+        END
+      `);
+
+      // DELETE trigger
+      this.db.run(`
+        CREATE TRIGGER IF NOT EXISTS observations_ad AFTER DELETE ON observations BEGIN
+          INSERT INTO observations_fts(observations_fts, rowid, title, subtitle, narrative, text, facts, concepts)
+          VALUES('delete', old.id, old.title, old.subtitle, old.narrative, old.text, old.facts, old.concepts);
+        END
+      `);
+
+      // UPDATE trigger
+      this.db.run(`
+        CREATE TRIGGER IF NOT EXISTS observations_au AFTER UPDATE ON observations BEGIN
+          INSERT INTO observations_fts(observations_fts, rowid, title, subtitle, narrative, text, facts, concepts)
+          VALUES('delete', old.id, old.title, old.subtitle, old.narrative, old.text, old.facts, old.concepts);
+          INSERT INTO observations_fts(rowid, title, subtitle, narrative, text, facts, concepts)
+          VALUES (new.id, new.title, new.subtitle, new.narrative, new.text, new.facts, new.concepts);
+        END
+      `);
+
+      // Backfill existing rows using 'rebuild' — required for external-content FTS5 to
+      // tokenize source-table content correctly. Direct INSERT only registers rowid mappings
+      // but does not build token index; 'rebuild' reads from content='observations' and
+      // tokenizes every row. Safe to call once on table creation; triggers handle future syncs.
+      this.db.run("INSERT INTO observations_fts(observations_fts) VALUES('rebuild')");
+
+      // Record only on success — if FTS5 is unavailable the next boot retries.
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(28, new Date().toISOString());
+      logger.debug('DB', 'Created observations_fts virtual table, sync triggers, and backfilled existing rows');
+    } catch (ftsError) {
+      logger.error('DB', 'FTS5 unavailable — BM25 search disabled; will retry on next boot', {}, ftsError as Error);
+    }
   }
 
   /**
@@ -1222,27 +1237,36 @@ export class MigrationRunner {
     const needContextType = !names.has('context_type');
     const needContextRef = !names.has('context_ref_json');
 
-    if (applied && !needContextType && !needContextRef) return;
+    // Guard: only skip if applied AND columns present AND the replacement unique index exists.
+    // A crash between the schema_versions write and the CREATE UNIQUE INDEX would leave the
+    // old index in place; checking index existence prevents a permanent partial-apply.
+    const newIndexExists = (this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_observation_tool_origins_observation_pending_context'"
+    ).all() as { name: string }[]).length > 0;
 
-    if (needContextType) {
-      this.db.run('ALTER TABLE observation_tool_origins ADD COLUMN context_type TEXT');
-    }
-    if (needContextRef) {
-      this.db.run('ALTER TABLE observation_tool_origins ADD COLUMN context_ref_json TEXT');
-    }
+    if (applied && !needContextType && !needContextRef && newIndexExists) return;
 
-    // Relax the unique index so multiple context origins can coexist with a
-    // tool-based origin on the same observation. The old index collapsed all
-    // NULL pending_message_id rows to sentinel -1 and would prevent the
-    // insertion of >1 context origin per observation.
-    this.db.run('DROP INDEX IF EXISTS idx_observation_tool_origins_observation_pending');
-    this.db.run(
-      'CREATE UNIQUE INDEX IF NOT EXISTS idx_observation_tool_origins_observation_pending_context ' +
-      'ON observation_tool_origins(observation_id, COALESCE(pending_message_id, -1), COALESCE(context_type, \'\'))'
-    );
-    this.db.run('CREATE INDEX IF NOT EXISTS idx_observation_tool_origins_context_type ON observation_tool_origins(context_type)');
+    this.db.transaction(() => {
+      if (needContextType) {
+        this.db.run('ALTER TABLE observation_tool_origins ADD COLUMN context_type TEXT');
+      }
+      if (needContextRef) {
+        this.db.run('ALTER TABLE observation_tool_origins ADD COLUMN context_ref_json TEXT');
+      }
 
-    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(31, new Date().toISOString());
+      // Relax the unique index so multiple context origins can coexist with a
+      // tool-based origin on the same observation. The old index collapsed all
+      // NULL pending_message_id rows to sentinel -1 and would prevent the
+      // insertion of >1 context origin per observation.
+      this.db.run('DROP INDEX IF EXISTS idx_observation_tool_origins_observation_pending');
+      this.db.run(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_observation_tool_origins_observation_pending_context ' +
+        'ON observation_tool_origins(observation_id, COALESCE(pending_message_id, -1), COALESCE(context_type, \'\'))'
+      );
+      this.db.run('CREATE INDEX IF NOT EXISTS idx_observation_tool_origins_context_type ON observation_tool_origins(context_type)');
+
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(31, new Date().toISOString());
+    })();
     logger.debug('DB', 'Migration V31 complete: context_type + context_ref_json on observation_tool_origins');
   }
 
@@ -1261,21 +1285,23 @@ export class MigrationRunner {
 
     if (applied && tableCheck) return;
 
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS mcp_invocations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        tool_name TEXT NOT NULL,
-        args_summary TEXT,
-        result_status TEXT NOT NULL,
-        error_message TEXT,
-        duration_ms INTEGER,
-        invoked_at_epoch INTEGER NOT NULL
-      )
-    `);
-    this.db.run('CREATE INDEX IF NOT EXISTS idx_mcp_invocations_tool_time ON mcp_invocations(tool_name, invoked_at_epoch DESC)');
-    this.db.run('CREATE INDEX IF NOT EXISTS idx_mcp_invocations_time ON mcp_invocations(invoked_at_epoch DESC)');
+    this.db.transaction(() => {
+      this.db.run(`
+        CREATE TABLE IF NOT EXISTS mcp_invocations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tool_name TEXT NOT NULL,
+          args_summary TEXT,
+          result_status TEXT NOT NULL,
+          error_message TEXT,
+          duration_ms INTEGER,
+          invoked_at_epoch INTEGER NOT NULL
+        )
+      `);
+      this.db.run('CREATE INDEX IF NOT EXISTS idx_mcp_invocations_tool_time ON mcp_invocations(tool_name, invoked_at_epoch DESC)');
+      this.db.run('CREATE INDEX IF NOT EXISTS idx_mcp_invocations_time ON mcp_invocations(invoked_at_epoch DESC)');
 
-    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(32, new Date().toISOString());
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(32, new Date().toISOString());
+    })();
     logger.debug('DB', 'Migration V32 complete: mcp_invocations table');
   }
 
@@ -1293,24 +1319,26 @@ export class MigrationRunner {
 
     if (applied && tableCheck) return;
 
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS memory_implicit_signals (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        decision_id INTEGER NOT NULL,
-        observation_id INTEGER NOT NULL,
-        signal_kind TEXT NOT NULL CHECK(signal_kind IN ('file_reuse', 'content_cited', 'no_overlap')),
-        evidence TEXT,
-        confidence REAL,
-        computed_at_epoch INTEGER NOT NULL,
-        FOREIGN KEY (decision_id) REFERENCES memory_assist_decisions(id),
-        FOREIGN KEY (observation_id) REFERENCES observations(id)
-      )
-    `);
-    this.db.run('CREATE INDEX IF NOT EXISTS idx_mis_decision ON memory_implicit_signals(decision_id)');
-    this.db.run('CREATE INDEX IF NOT EXISTS idx_mis_obs ON memory_implicit_signals(observation_id)');
-    this.db.run('CREATE INDEX IF NOT EXISTS idx_mis_kind_time ON memory_implicit_signals(signal_kind, computed_at_epoch DESC)');
+    this.db.transaction(() => {
+      this.db.run(`
+        CREATE TABLE IF NOT EXISTS memory_implicit_signals (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          decision_id INTEGER NOT NULL,
+          observation_id INTEGER NOT NULL,
+          signal_kind TEXT NOT NULL CHECK(signal_kind IN ('file_reuse', 'content_cited', 'no_overlap')),
+          evidence TEXT,
+          confidence REAL,
+          computed_at_epoch INTEGER NOT NULL,
+          FOREIGN KEY (decision_id) REFERENCES memory_assist_decisions(id),
+          FOREIGN KEY (observation_id) REFERENCES observations(id)
+        )
+      `);
+      this.db.run('CREATE INDEX IF NOT EXISTS idx_mis_decision ON memory_implicit_signals(decision_id)');
+      this.db.run('CREATE INDEX IF NOT EXISTS idx_mis_obs ON memory_implicit_signals(observation_id)');
+      this.db.run('CREATE INDEX IF NOT EXISTS idx_mis_kind_time ON memory_implicit_signals(signal_kind, computed_at_epoch DESC)');
 
-    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(33, new Date().toISOString());
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(33, new Date().toISOString());
+    })();
     logger.debug('DB', 'Migration V33 complete: memory_implicit_signals table');
   }
 
@@ -1318,13 +1346,14 @@ export class MigrationRunner {
     const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(34) as SchemaVersion | undefined;
     if (applied) return;
 
-    // Guard against cross-machine DB sync that already added the column.
-    const cols = this.db.prepare('PRAGMA table_info(observation_capture_snapshots)').all() as Array<{ name: string }>;
-    if (!cols.some(c => c.name === 'llm_raw_type')) {
-      this.db.run(`ALTER TABLE observation_capture_snapshots ADD COLUMN llm_raw_type TEXT`);
-    }
-
-    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(34, new Date().toISOString());
+    this.db.transaction(() => {
+      // Guard against cross-machine DB sync that already added the column.
+      const cols = this.db.prepare('PRAGMA table_info(observation_capture_snapshots)').all() as Array<{ name: string }>;
+      if (!cols.some(c => c.name === 'llm_raw_type')) {
+        this.db.run(`ALTER TABLE observation_capture_snapshots ADD COLUMN llm_raw_type TEXT`);
+      }
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(34, new Date().toISOString());
+    })();
     logger.debug('DB', 'Migration V34 complete: llm_raw_type column on observation_capture_snapshots');
   }
 }
