@@ -14,6 +14,11 @@
  */
 import type { Database } from 'bun:sqlite';
 import { logger } from '../../../utils/logger.js';
+import { redactSecrets } from '../../../sdk/prompts.js';
+
+function redactNullable(value: string | null): string | null {
+  return value == null ? value : redactSecrets(value);
+}
 
 export interface CaptureSnapshotSource {
   memorySessionId: string | null;
@@ -98,11 +103,11 @@ export function insertCaptureSnapshot(
       source.memorySessionId,
       source.contentSessionId,
       source.promptNumber,
-      source.userPrompt,
-      source.priorAssistantMessage,
+      redactNullable(source.userPrompt),
+      redactNullable(source.priorAssistantMessage),
       source.toolName,
-      source.toolInput,
-      source.toolOutput,
+      redactNullable(source.toolInput),
+      redactNullable(source.toolOutput),
       source.cwd,
       captured.type,
       captured.llmRawType,

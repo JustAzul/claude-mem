@@ -1022,6 +1022,11 @@ export class MigrationRunner {
     const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(29) as SchemaVersion | undefined;
     if (applied) return;
 
+    // Wrap the full migration (schema ALTERs + FTS recreate + schema_versions insert)
+    // in one transaction. Without this, a mid-way FTS failure leaves observations
+    // altered + schema_versions marked V29-applied, which makes the missing FTS
+    // triggers permanent: next boot's idempotency check at 1023 skips the block.
+    const runMigration = this.db.transaction(() => {
     // Check schema first in case cross-machine DB sync already added the columns
     const cols = this.db.prepare('PRAGMA table_info(observations)').all() as Array<{ name: string }>;
     const names = new Set(cols.map(c => c.name));
@@ -1035,8 +1040,8 @@ export class MigrationRunner {
 
     // Extend FTS5 virtual table to include why and alternatives_rejected.
     // External-content FTS5 does not support ALTER TABLE, so we must DROP and recreate.
-    // Skip gracefully if FTS5 is unavailable (e.g., rare Bun/Windows edge case).
-    try {
+    // Any failure here MUST abort the transaction so V29 does not get marked applied
+    // with missing FTS triggers — re-raise instead of swallowing.
       const hasFTSTable = (this.db.prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='observations_fts'"
       ).all() as { name: string }[]).length > 0;
@@ -1093,11 +1098,10 @@ export class MigrationRunner {
           logger.debug('DB', 'Rebuilt observations_fts with why + alternatives_rejected columns');
         }
       }
-    } catch (ftsError) {
-      logger.warn('DB', 'FTS5 extension for V29 skipped', {}, ftsError as Error);
-    }
 
-    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(29, new Date().toISOString());
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(29, new Date().toISOString());
+    });
+    runMigration();
     logger.debug('DB', 'Migration V29 complete: why/alternatives_rejected/related_observation_ids added to observations');
   }
 
@@ -1314,7 +1318,11 @@ export class MigrationRunner {
     const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(34) as SchemaVersion | undefined;
     if (applied) return;
 
-    this.db.run(`ALTER TABLE observation_capture_snapshots ADD COLUMN llm_raw_type TEXT`);
+    // Guard against cross-machine DB sync that already added the column.
+    const cols = this.db.prepare('PRAGMA table_info(observation_capture_snapshots)').all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'llm_raw_type')) {
+      this.db.run(`ALTER TABLE observation_capture_snapshots ADD COLUMN llm_raw_type TEXT`);
+    }
 
     this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(34, new Date().toISOString());
     logger.debug('DB', 'Migration V34 complete: llm_raw_type column on observation_capture_snapshots');

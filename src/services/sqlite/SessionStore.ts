@@ -1467,7 +1467,11 @@ export class SessionStore {
     const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(34) as SchemaVersion | undefined;
     if (applied) return;
 
-    this.db.run(`ALTER TABLE observation_capture_snapshots ADD COLUMN llm_raw_type TEXT`);
+    // Guard against cross-machine DB sync that already added the column.
+    const cols = this.db.prepare('PRAGMA table_info(observation_capture_snapshots)').all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'llm_raw_type')) {
+      this.db.run(`ALTER TABLE observation_capture_snapshots ADD COLUMN llm_raw_type TEXT`);
+    }
     this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(34, new Date().toISOString());
     logger.debug('DB', 'SessionStore: migration V34 complete (llm_raw_type column on observation_capture_snapshots)');
   }
