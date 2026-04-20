@@ -319,6 +319,23 @@ def run_one_instance(
         else:
             # Pay-per-call path.
             cmd += ["-e", "ANTHROPIC_API_KEY"]
+        # Forward model selection from host settings.json
+        host_settings = Path.home() / ".claude" / "settings.json"
+        if host_settings.exists():
+            try:
+                import json as _json
+                data = _json.loads(host_settings.read_text(encoding="utf-8"))
+                model = data.get("model")
+                if model:
+                    cmd += ["-e", f"CLAUDE_MEM_MODEL={model}"]
+            except Exception:
+                pass
+
+        # Forward provider env vars if set on host
+        for env_var in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_BASE_URL"):
+            if os.environ.get(env_var):
+                cmd += ["-e", env_var]
+
         cmd += [
             image,
             instance_id,

@@ -45,6 +45,12 @@ fi
 
 MODEL_NAME="claude-opus-4-7+claude-mem"
 
+# Build --model flag if host forwarded a model override via run-batch.py / smoke-test.sh
+MODEL_FLAG=()
+if [[ -n "${CLAUDE_MEM_MODEL:-}" ]]; then
+  MODEL_FLAG=(--model "$CLAUDE_MEM_MODEL")
+fi
+
 # Per-instance ephemeral scratch dir — isolates ~/.claude/ and ~/.claude-mem/.
 SCRATCH=$(mktemp -d)
 REPO_DIR="$SCRATCH/repo"
@@ -117,11 +123,13 @@ set +e
   cd "$REPO_DIR" && HOME="$SCRATCH" claude \
     --print \
     --session-id "$SESSION_ID" \
+    "${MODEL_FLAG[@]}" \
     --plugin-dir /opt/claude-mem \
     --permission-mode bypassPermissions \
     --allowedTools "Read,Glob,Grep,Bash(ls *),Bash(wc *)" \
     --max-budget-usd 5.00 \
-    --output-format json \
+    --verbose \
+    --output-format stream-json \
     "$INGEST_PROMPT"
 ) > "$INGEST_LOG" 2>&1
 INGEST_EXIT=$?
@@ -147,11 +155,13 @@ set +e
   cd "$REPO_DIR" && HOME="$SCRATCH" claude \
     --print \
     --resume "$SESSION_ID" \
+    "${MODEL_FLAG[@]}" \
     --plugin-dir /opt/claude-mem \
     --permission-mode bypassPermissions \
-    --allowedTools "Read,Glob,Grep,Edit,Write,Bash(git *),Bash(ls *)" \
+    --allowedTools "Read,Glob,Grep,Edit,Write,Bash(git *),Bash(ls *),mcp__plugin_claude-mem_mcp-search__search,mcp__plugin_claude-mem_mcp-search__get_observations,mcp__plugin_claude-mem_mcp-search__timeline,mcp__plugin_claude-mem_mcp-search__smart_search" \
     --max-budget-usd 5.00 \
-    --output-format json \
+    --verbose \
+    --output-format stream-json \
     "$FIX_PROMPT"
 ) > "$FIX_LOG" 2>&1
 FIX_EXIT=$?

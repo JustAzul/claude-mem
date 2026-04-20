@@ -110,11 +110,23 @@ fi
 # fires (SIGTERM from timeout leaves the container state open briefly).
 CONTAINER_NAME="claude-mem-smoke-$INSTANCE_ID-$$"
 
+# Forward model + provider env vars from host
+MODEL_ENV_ARGS=()
+if [[ -f "$HOME/.claude/settings.json" ]]; then
+  _model=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('model',''))" \
+    "$HOME/.claude/settings.json" 2>/dev/null || true)
+  [[ -n "$_model" ]] && MODEL_ENV_ARGS+=(-e "CLAUDE_MEM_MODEL=$_model")
+fi
+for _var in CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX ANTHROPIC_BASE_URL; do
+  [[ -n "${!_var:-}" ]] && MODEL_ENV_ARGS+=(-e "$_var=${!_var}")
+done
+
 set +e
 "${TIMEOUT_CMD[@]}" docker run --rm \
   --name "$CONTAINER_NAME" \
   -e CLAUDE_MEM_OUTPUT_DIR=/scratch \
   -e CLAUDE_MEM_CREDENTIALS_FILE=/auth/.credentials.json \
+  "${MODEL_ENV_ARGS[@]}" \
   -v "$SCRATCH:/scratch" \
   -v "$CREDS_FILE:/auth/.credentials.json:ro" \
   "$IMAGE" \
