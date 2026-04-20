@@ -1027,21 +1027,21 @@ export class MigrationRunner {
     // altered + schema_versions marked V29-applied, which makes the missing FTS
     // triggers permanent: next boot's idempotency check at 1023 skips the block.
     const runMigration = this.db.transaction(() => {
-    // Check schema first in case cross-machine DB sync already added the columns
-    const cols = this.db.prepare('PRAGMA table_info(observations)').all() as Array<{ name: string }>;
-    const names = new Set(cols.map(c => c.name));
-    const needWhy = !names.has('why');
-    const needAlt = !names.has('alternatives_rejected');
-    const needRel = !names.has('related_observation_ids');
+      // Check schema first in case cross-machine DB sync already added the columns
+      const cols = this.db.prepare('PRAGMA table_info(observations)').all() as Array<{ name: string }>;
+      const names = new Set(cols.map(c => c.name));
+      const needWhy = !names.has('why');
+      const needAlt = !names.has('alternatives_rejected');
+      const needRel = !names.has('related_observation_ids');
 
-    if (needWhy) this.db.run('ALTER TABLE observations ADD COLUMN why TEXT');
-    if (needAlt) this.db.run('ALTER TABLE observations ADD COLUMN alternatives_rejected TEXT');
-    if (needRel) this.db.run('ALTER TABLE observations ADD COLUMN related_observation_ids TEXT');
+      if (needWhy) this.db.run('ALTER TABLE observations ADD COLUMN why TEXT');
+      if (needAlt) this.db.run('ALTER TABLE observations ADD COLUMN alternatives_rejected TEXT');
+      if (needRel) this.db.run('ALTER TABLE observations ADD COLUMN related_observation_ids TEXT');
 
-    // Extend FTS5 virtual table to include why and alternatives_rejected.
-    // External-content FTS5 does not support ALTER TABLE, so we must DROP and recreate.
-    // Any failure here MUST abort the transaction so V29 does not get marked applied
-    // with missing FTS triggers — re-raise instead of swallowing.
+      // Extend FTS5 virtual table to include why and alternatives_rejected.
+      // External-content FTS5 does not support ALTER TABLE, so we must DROP and recreate.
+      // Any failure here aborts the transaction (no try/catch by design): we would
+      // rather retry on next boot than mark V29 applied with missing FTS triggers.
       const hasFTSTable = (this.db.prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='observations_fts'"
       ).all() as { name: string }[]).length > 0;

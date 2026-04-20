@@ -118,7 +118,7 @@ ${o.stack}`:` ${o.message}`:this.getLevel()===0&&typeof o=="object"?u=`
     ${o}
     ORDER BY created_at_epoch DESC
     LIMIT ${s}
-  `).all(...r).map(Se);return l.debug(`[memory-assist-decisions] loaded ${a.length} recent decisions (limit=${s})`),a}function St(t,e,s,n,r=Date.now()){let o=r-n;return t.prepare(`
+  `).all(...r).map(Se);return l.debug(`[memory-assist-decisions] loaded ${a.length} recent decisions (limit=${s})`),a}function St(t,e,s,n,r=Date.now()){let i=r-n,a=r+1e3;return t.prepare(`
     SELECT *
     FROM memory_assist_decisions
     WHERE content_session_id = ?
@@ -126,7 +126,7 @@ ${o.stack}`:` ${o.message}`:this.getLevel()===0&&typeof o=="object"?u=`
       AND created_at_epoch >= ?
       AND created_at_epoch <= ?
     ORDER BY created_at_epoch DESC
-  `).all(e,s,o,r).map(Se)}function yt(t,e,s,n,r,o){t.prepare(`
+  `).all(e,s,i,a).map(Se)}function yt(t,e,s,n,r,o){t.prepare(`
     UPDATE memory_assist_decisions
     SET system_verdict = ?,
         system_confidence = ?,

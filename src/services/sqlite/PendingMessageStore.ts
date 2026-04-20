@@ -367,24 +367,28 @@ export class PendingMessageStore {
    * Otherwise marks as 'failed' permanently
    */
   markFailed(messageId: number): void {
-    // Atomic CAS: increment retry_count only if strictly below cap. Avoids
-    // read-then-write race where two workers see retry_count = maxRetries - 1
-    // and both write retry_count = maxRetries (bypassing the cap by 1).
+    // Invariant: only act on rows currently 'processing'. If another caller
+    // already re-queued the row to 'pending' or marked it 'failed', this call
+    // is a no-op — prevents the race where worker A re-queues and worker B's
+    // fallback then flips the freshly-pending row to 'failed'. Atomic CAS on
+    // retry_count also avoids the original cap-bypass race.
     const retryStmt = this.db.prepare(`
       UPDATE pending_messages
       SET status = 'pending', retry_count = retry_count + 1, started_processing_at_epoch = NULL
-      WHERE id = ? AND retry_count < ?
+      WHERE id = ? AND status = 'processing' AND retry_count < ?
     `);
     const result = retryStmt.run(messageId, this.maxRetries);
 
     if (result.changes > 0) return;
 
-    // Either the row is missing or retry_count already >= maxRetries.
-    // Mark permanently failed (idempotent if row is missing).
+    // Row still 'processing' but hit retry cap → terminal fail. If the row has
+    // moved out of 'processing' (re-queued or already failed), this affects
+    // 0 rows and is a safe no-op. Uses failed_at_epoch to match the rest of
+    // the failure paths (markSessionMessagesFailed, stale-sweep).
     const failStmt = this.db.prepare(`
       UPDATE pending_messages
-      SET status = 'failed', completed_at_epoch = ?
-      WHERE id = ?
+      SET status = 'failed', failed_at_epoch = ?
+      WHERE id = ? AND status = 'processing'
     `);
     failStmt.run(Date.now(), messageId);
   }

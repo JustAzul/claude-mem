@@ -290,7 +290,7 @@ ${n.prompts.header_memory_continued}`}var gre,ll=te(()=>{"use strict";G();gre=[{
     ${s}
     ORDER BY created_at_epoch DESC
     LIMIT ${r}
-  `).all(...i).map(Wg);return g.debug(`[memory-assist-decisions] loaded ${a.length} recent decisions (limit=${r})`),a}function vj(t,e,r,n,i=Date.now()){let s=i-n;return t.prepare(`
+  `).all(...i).map(Wg);return g.debug(`[memory-assist-decisions] loaded ${a.length} recent decisions (limit=${r})`),a}function vj(t,e,r,n,i=Date.now()){let o=i-n,a=i+1e3;return t.prepare(`
     SELECT *
     FROM memory_assist_decisions
     WHERE content_session_id = ?
@@ -298,7 +298,7 @@ ${n.prompts.header_memory_continued}`}var gre,ll=te(()=>{"use strict";G();gre=[{
       AND created_at_epoch >= ?
       AND created_at_epoch <= ?
     ORDER BY created_at_epoch DESC
-  `).all(e,r,s,i).map(Wg)}function yj(t,e,r,n,i,s){t.prepare(`
+  `).all(e,r,o,a).map(Wg)}function yj(t,e,r,n,i,s){t.prepare(`
     UPDATE memory_assist_decisions
     SET system_verdict = ?,
         system_confidence = ?,
@@ -1511,11 +1511,11 @@ Please see the 3.x to 4.x migration guide for details on how to update your app.
     `).all(n,e)}markFailed(e){if(this.db.prepare(`
       UPDATE pending_messages
       SET status = 'pending', retry_count = retry_count + 1, started_processing_at_epoch = NULL
-      WHERE id = ? AND retry_count < ?
+      WHERE id = ? AND status = 'processing' AND retry_count < ?
     `).run(e,this.maxRetries).changes>0)return;this.db.prepare(`
       UPDATE pending_messages
-      SET status = 'failed', completed_at_epoch = ?
-      WHERE id = ?
+      SET status = 'failed', failed_at_epoch = ?
+      WHERE id = ? AND status = 'processing'
     `).run(Date.now(),e)}resetStuckMessages(e){let r=e===0?Date.now():Date.now()-e;return this.db.prepare(`
       UPDATE pending_messages
       SET status = 'pending', started_processing_at_epoch = NULL
