@@ -15,6 +15,7 @@
  * SettingsDefaultsManager once Probe B ships.
  */
 import path from 'path';
+import { logger } from '../../../utils/logger.js';
 import { SettingsDefaultsManager } from '../../../shared/SettingsDefaultsManager.js';
 
 export const RECOMMENDER_PAUSED_REASON = 'awaiting content-reuse signal';

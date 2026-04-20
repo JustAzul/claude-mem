@@ -97,7 +97,11 @@ describe('GeminiAgent', () => {
       storeSummary: mockStoreSummary,
       markSessionCompleted: mockMarkSessionCompleted,
       getSessionById: mock(() => ({ memory_session_id: 'mem-session-123' })), // Required by ResponseProcessor.ts for FK fix
-      ensureMemorySessionIdRegistered: mock(() => {}) // Required by ResponseProcessor.ts for FK constraint fix (Issue #846)
+      ensureMemorySessionIdRegistered: mock(() => {}), // Required by ResponseProcessor.ts for FK constraint fix (Issue #846)
+      insertContextOrigin: mock(() => {}), // Required by ResponseProcessor.ts for V31 context origin tracking
+      recordObservationTypeCorrection: mock(() => {}), // Required by ResponseProcessor.ts for type correction telemetry
+      attachGeneratedObservationsToOutcomeSignal: mock(() => null),
+      attachObservationOriginsToPendingMessage: mock(() => []),
     };
 
     const mockChromaSync = {

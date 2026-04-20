@@ -584,7 +584,10 @@ export class WorkerService {
       logger.info('SYSTEM', 'Started orphan reaper (runs every 30 seconds)');
 
       // Reap stale sessions to unblock orphan process cleanup (Issue #1168)
+      let reaperRunning = false;
       this.staleSessionReaperInterval = setInterval(async () => {
+        if (reaperRunning) return;
+        reaperRunning = true;
         try {
           const reaped = await this.sessionManager.reapStaleSessions();
           if (reaped > 0) {
@@ -597,6 +600,8 @@ export class WorkerService {
           } else {
             logger.error('WORKER', 'Stale session reaper error with non-Error', {}, new Error(String(e)));
           }
+        } finally {
+          reaperRunning = false;
         }
 
         // Purge failed pending messages to prevent unbounded queue growth (#1957)

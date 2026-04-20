@@ -257,12 +257,21 @@ Respond with ONLY this XML block — no other text, no <observation> tags:
       }
 
       const sessionDuration = Date.now() - session.startTime;
+
+      let safeBaseUrl = baseUrl;
+      try {
+        const u = new URL(baseUrl);
+        u.username = '';
+        u.password = '';
+        safeBaseUrl = u.toString();
+      } catch { /* not a parseable URL — log as-is */ }
+
       logger.success('SDK', 'Custom OpenAI agent completed', {
         sessionId: session.sessionDbId,
         duration: `${(sessionDuration / 1000).toFixed(1)}s`,
         historyLength: session.conversationHistory.length,
         model,
-        baseUrl
+        baseUrl: safeBaseUrl
       });
 
     } catch (error: unknown) {
@@ -369,7 +378,7 @@ Respond with ONLY this XML block — no other text, no <observation> tags:
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorText = (await response.text()).slice(0, 200);
       throw new Error(`Custom provider API error: ${response.status} - ${errorText}`);
     }
 

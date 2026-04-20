@@ -75,9 +75,8 @@ describe('session-completion requeue vs abandon', () => {
 
     const changed = pendingStore.requeueInFlightForSession(sid);
 
-    // All three rows were touched by the UPDATE (same status, but the WHERE
-    // clause matched them), producing changes === 3 under SQLite semantics.
-    expect(changed).toBe(3);
+    // Only 'processing' rows are touched; none were claimed, so 0 changes.
+    expect(changed).toBe(0);
     expect(rowStatuses(sid)).toEqual(['pending', 'pending', 'pending']);
     expect(pendingStore.getPendingCount(sid)).toBe(3);
     expect(pendingStore.hasAnyPendingWork()).toBe(true);
@@ -99,7 +98,7 @@ describe('session-completion requeue vs abandon', () => {
     expect(beforeRow.started_processing_at_epoch).not.toBeNull();
 
     const changed = pendingStore.requeueInFlightForSession(sid);
-    expect(changed).toBe(2);
+    expect(changed).toBe(1); // only the 'processing' row is touched
 
     const afterRow = db
       .prepare('SELECT status, started_processing_at_epoch FROM pending_messages WHERE id = ?')
@@ -134,7 +133,7 @@ describe('session-completion requeue vs abandon', () => {
     ).toBe('pending');
 
     const changed = pendingStore.requeueInFlightForSession(sid);
-    expect(changed).toBe(1); // only C matched WHERE status IN ('pending','processing')
+    expect(changed).toBe(0); // C is 'pending', not 'processing' — not touched
 
     // A is gone (deleted on confirmProcessed), B stays failed, C stays pending
     const finalA = db.prepare(`SELECT status FROM pending_messages WHERE id = ?`).get(msgA);

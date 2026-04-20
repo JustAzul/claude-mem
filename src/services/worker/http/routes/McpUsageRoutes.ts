@@ -5,6 +5,7 @@
  */
 
 import express, { Request, Response } from 'express';
+import { logger } from '../../../../utils/logger.js';
 import { DatabaseManager } from '../../DatabaseManager.js';
 import { BaseRouteHandler } from '../BaseRouteHandler.js';
 

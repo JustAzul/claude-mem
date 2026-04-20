@@ -111,13 +111,13 @@ export function insertCaptureSnapshot(
       source.cwd,
       captured.type,
       captured.llmRawType,
-      captured.title,
-      captured.subtitle,
-      captured.narrative,
+      redactNullable(captured.title),
+      redactNullable(captured.subtitle),
+      redactNullable(captured.narrative),
       captured.facts,
       captured.concepts,
-      captured.why,
-      captured.alternativesRejected,
+      redactNullable(captured.why),
+      redactNullable(captured.alternativesRejected),
       captured.relatedObservationIds,
       createdAtEpoch
     );

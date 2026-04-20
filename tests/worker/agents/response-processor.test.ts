@@ -273,15 +273,14 @@ describe('ResponseProcessor', () => {
 
       expect(logger.warn).toHaveBeenCalledWith(
         'PARSER',
-        'TestAgent returned non-XML response; observation content was discarded',
+        'TestAgent returned non-XML response; marking messages as failed for retry (#1874)',
         expect.objectContaining({
           sessionId: 1,
           preview: responseText
         })
       );
-      const [, , observations, summary] = mockStoreObservations.mock.calls[0];
-      expect(observations).toHaveLength(0);
-      expect(summary).toBeNull();
+      // Non-XML responses return early — storeObservations is NOT called
+      expect(mockStoreObservations).toHaveBeenCalledTimes(0);
     });
   });
 
@@ -591,9 +590,8 @@ describe('ResponseProcessor', () => {
         'TestAgent'
       );
 
-      expect(mockStoreObservations).toHaveBeenCalledTimes(1);
-      const [, , observations] = mockStoreObservations.mock.calls[0];
-      expect(observations).toHaveLength(0);
+      // Non-XML responses return early — storeObservations is NOT called
+      expect(mockStoreObservations).toHaveBeenCalledTimes(0);
     });
   });
 
@@ -843,8 +841,11 @@ describe('ResponseProcessor', () => {
       const session = createMockSession({
         conversationHistory: [{ role: 'user', content: SUMMARY_PROMPT }],
       });
-      // LLM returned nothing structured — no summary stored
-      const badResponse = 'I cannot comply with that request.';
+      // Use XML-shaped response that bypasses the non-XML early-return path (#1874)
+      // but produces no summary. A bare ghost observation (no title/narrative/facts/concepts)
+      // is silently dropped by the parser, leaving observations=[] and summary=null,
+      // which triggers the circuit-breaker increment.
+      const badResponse = '<observation><type>discovery</type></observation>';
 
       await processAgentResponse(badResponse, session, mockDbManager, mockSessionManager, mockWorker, 0, null, 'TestAgent');
 

@@ -10,6 +10,7 @@
  * - Additive scoring: Combined scoring with semantic + BM25 + entity boost.
  */
 
+import { logger } from '../../../utils/logger.js';
 import type { ObservationSearchResult } from './types.js';
 
 /**

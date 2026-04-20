@@ -309,9 +309,10 @@ export function getMemoryAssistDecisionsForPrompt(
   // before the signal that resolves them, so only past rows are valid
   // candidates. A symmetric [ref-withinMs, ref+withinMs] window would double
   // the effective span and raise cross-prompt collisions on rapid re-prompting.
-  // The 1s forward tolerance absorbs clock drift / batched writes where the
-  // decision's epoch can land microseconds after referenceEpoch.
-  const DRIFT_TOLERANCE_MS = 1000;
+  // 100ms forward tolerance absorbs clock drift / batched writes where the
+  // decision's epoch can land microseconds after referenceEpoch. Keeping it
+  // tight (vs 1s) prevents bleeding into the next prompt on rapid re-prompting.
+  const DRIFT_TOLERANCE_MS = 100;
   const sinceEpoch = referenceEpoch - withinMs;
   const untilEpoch = referenceEpoch + DRIFT_TOLERANCE_MS;
   const rows = db.prepare(`

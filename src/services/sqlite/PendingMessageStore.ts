@@ -309,22 +309,23 @@ export class PendingMessageStore {
    * Unlike markAllSessionMessagesAbandoned, this keeps messages eligible
    * for processing so the next worker/generator can claim them.
    *
-   * 'pending' messages are left as-is (the UPDATE is a no-op for them).
-   * 'processing' messages get their in-flight marker (started_processing_at_epoch)
-   * cleared so the next generator can re-claim them without tripping stale
-   * processing guards.
+   * Only 'processing' rows are touched: status is reset to 'pending',
+   * started_processing_at_epoch is cleared, and created_at_epoch is refreshed
+   * to now. Refreshing created_at_epoch ensures the stale-sweep grace window
+   * (keyed on created_at_epoch) does not immediately sweep the re-enqueued rows.
+   * 'pending' rows are already in the correct state and are left untouched.
    *
    * No change to messages in 'processed' or 'failed' — those are terminal.
    *
-   * @returns Number of messages reset
+   * @returns Number of 'processing' messages actually reset
    */
   requeueInFlightForSession(sessionDbId: number): number {
     const stmt = this.db.prepare(`
       UPDATE pending_messages
-      SET status = 'pending', started_processing_at_epoch = NULL
-      WHERE session_db_id = ? AND status IN ('pending', 'processing')
+      SET status = 'pending', started_processing_at_epoch = NULL, created_at_epoch = ?
+      WHERE session_db_id = ? AND status = 'processing'
     `);
-    return stmt.run(sessionDbId).changes;
+    return stmt.run(Date.now(), sessionDbId).changes;
   }
 
   /**

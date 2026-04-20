@@ -48,15 +48,12 @@ export class MemoryAssistTracker {
       reason: event.reason,
     });
 
-    const normalized = this.normalizeAndTrim([
+    this.events.splice(0, this.events.length, ...this.normalizeAndTrim([
       event as MemoryAssistEvent,
       ...this.events,
-    ])[0]!;
-
-    this.events.splice(0, this.events.length, ...this.normalizeAndTrim([
-      normalized,
-      ...this.events,
     ]));
+
+    const normalized = this.events[0] ?? (event as MemoryAssistEvent);
 
     this.sseBroadcaster.broadcast({
       type: 'memory_assist_status',

@@ -110,7 +110,8 @@ describe('SearchOrchestrator', () => {
     mockSessionStore = {
       getObservationsByIds: mock(() => [mockObservation]),
       getSessionSummariesByIds: mock(() => [mockSession]),
-      getUserPromptsByIds: mock(() => [mockPrompt])
+      getUserPromptsByIds: mock(() => [mockPrompt]),
+      db: { prepare: mock(() => ({ all: mock(() => [{ name: 'observations_fts' }]) })) }
     };
 
     mockChromaSync = {
@@ -145,7 +146,8 @@ describe('SearchOrchestrator', () => {
           query: 'semantic search query'
         });
 
-        expect(result.strategy).toBe('chroma');
+        // When both Chroma and FTS are available, orchestrator uses MultiSignal (PATH 2c)
+        expect(result.strategy).toBe('multi_signal');
         expect(result.usedChroma).toBe(true);
         expect(mockChromaSync.queryChroma).toHaveBeenCalled();
       });
@@ -318,8 +320,8 @@ describe('SearchOrchestrator', () => {
           query: 'semantic query'
         });
 
-        // No Chroma available, can't do semantic search
-        expect(result.results.observations).toHaveLength(0);
+        // Without Chroma, FTS handles query searches (PATH 2e) — results come from FTS
+        expect(result.strategy).toBe('fts');
         expect(result.usedChroma).toBe(false);
       });
 

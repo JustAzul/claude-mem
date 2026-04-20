@@ -38,6 +38,11 @@ const EXCLUDED_PATTERNS = [
   /cli\/hook-command\.ts$/,  // CLI hook command uses console.log/error for hook protocol output
   /cli\/handlers\/user-message\.ts$/,  // User message handler uses console.error for user-visible context
   /services\/transcripts\/cli\.ts$/,  // CLI transcript subcommands use console.log for user-visible interactive output
+  /^npx-cli\//,  // npx CLI entry points use console.log for user-facing interactive output
+  /services\/integrations\/McpIntegrations\.ts$/,  // IDE integration installer uses console.log for interactive installation output
+  /utils\/worktree\.ts$/,  // Worktree detection utility uses console.warn for startup diagnostics without logger dependency
+  /utils\/project-filter\.ts$/,  // Project filter utility uses console.warn for pattern validation errors
+  /shared\/plugin-state\.ts$/,  // Plugin state reader uses console.error to avoid circular logger dependency at startup
 ];
 
 // Files that should always use logger (core business logic)

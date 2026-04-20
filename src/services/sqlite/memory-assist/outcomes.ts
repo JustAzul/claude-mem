@@ -163,29 +163,32 @@ export function attachGeneratedObservationsToOutcomeSignal(
 ): number[] {
   if (observationIds.length === 0) return [];
 
-  const row = db.prepare(`
-    SELECT generated_observation_ids_json
-    FROM memory_assist_outcome_signals
-    WHERE pending_message_id = ?
-    ORDER BY id DESC
-    LIMIT 1
-  `).get(pendingMessageId) as Pick<OutcomeRow, 'generated_observation_ids_json'> | undefined;
+  return db.transaction((): number[] => {
+    const row = db.prepare(`
+      SELECT id, generated_observation_ids_json
+      FROM memory_assist_outcome_signals
+      WHERE pending_message_id = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(pendingMessageId) as Pick<OutcomeRow, 'id' | 'generated_observation_ids_json'> | undefined;
 
-  if (!row) {
-    logger.debug(`[memory-assist-outcomes] no outcome signal found for pending message ${pendingMessageId}`);
-    return [];
-  }
+    if (!row) {
+      logger.debug(`[memory-assist-outcomes] no outcome signal found for pending message ${pendingMessageId}`);
+      return [];
+    }
 
-  const existing = parseJson<number[]>(row.generated_observation_ids_json, []);
-  const merged = [...new Set([...existing, ...observationIds])];
-  db.prepare(`
-    UPDATE memory_assist_outcome_signals
-    SET generated_observation_ids_json = ?
-    WHERE pending_message_id = ?
-  `).run(serializeJson(merged), pendingMessageId);
+    const existing = parseJson<number[]>(row.generated_observation_ids_json, []);
+    const merged = [...new Set([...existing, ...observationIds])];
 
-  logger.debug(`[memory-assist-outcomes] attached ${observationIds.length} observations to pending message ${pendingMessageId}`);
-  return merged;
+    db.prepare(`
+      UPDATE memory_assist_outcome_signals
+      SET generated_observation_ids_json = ?
+      WHERE id = ?
+    `).run(serializeJson(merged), row.id);
+
+    logger.debug(`[memory-assist-outcomes] attached ${observationIds.length} observations to pending message ${pendingMessageId}`);
+    return merged;
+  })();
 }
 
 export function getOutcomeSignalsForDecisionIds(
