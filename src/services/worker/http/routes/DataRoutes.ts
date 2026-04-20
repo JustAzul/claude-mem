@@ -101,8 +101,8 @@ export class DataRoutes extends BaseRouteHandler {
    * Get paginated observations
    */
   private handleGetObservations = this.wrapHandler((req: Request, res: Response): void => {
-    const { offset, limit, project, platformSource } = this.parsePaginationParams(req);
-    const result = this.paginationHelper.getObservations(offset, limit, project, platformSource);
+    const { offset, limit, project, platformSource, withinDays } = this.parsePaginationParams(req);
+    const result = this.paginationHelper.getObservations(offset, limit, project, platformSource, withinDays);
     res.json(result);
   });
 
@@ -110,8 +110,8 @@ export class DataRoutes extends BaseRouteHandler {
    * Get paginated summaries
    */
   private handleGetSummaries = this.wrapHandler((req: Request, res: Response): void => {
-    const { offset, limit, project, platformSource } = this.parsePaginationParams(req);
-    const result = this.paginationHelper.getSummaries(offset, limit, project, platformSource);
+    const { offset, limit, project, platformSource, withinDays } = this.parsePaginationParams(req);
+    const result = this.paginationHelper.getSummaries(offset, limit, project, platformSource, withinDays);
     res.json(result);
   });
 
@@ -119,8 +119,8 @@ export class DataRoutes extends BaseRouteHandler {
    * Get paginated user prompts
    */
   private handleGetPrompts = this.wrapHandler((req: Request, res: Response): void => {
-    const { offset, limit, project, platformSource } = this.parsePaginationParams(req);
-    const result = this.paginationHelper.getPrompts(offset, limit, project, platformSource);
+    const { offset, limit, project, platformSource, withinDays } = this.parsePaginationParams(req);
+    const result = this.paginationHelper.getPrompts(offset, limit, project, platformSource, withinDays);
     res.json(result);
   });
 
@@ -518,14 +518,15 @@ export class DataRoutes extends BaseRouteHandler {
   /**
    * Parse pagination parameters from request query
    */
-  private parsePaginationParams(req: Request): { offset: number; limit: number; project?: string; platformSource?: string } {
+  private parsePaginationParams(req: Request): { offset: number; limit: number; project?: string; platformSource?: string; withinDays: number } {
     const offset = parseInt(req.query.offset as string, 10) || 0;
     const limit = Math.min(parseInt(req.query.limit as string, 10) || 20, 100); // Max 100
     const project = req.query.project as string | undefined;
     const rawPlatformSource = req.query.platformSource as string | undefined;
     const platformSource = rawPlatformSource ? normalizePlatformSource(rawPlatformSource) : undefined;
+    const withinDays = Math.max(parseInt(req.query.withinDays as string, 10) || 30, 0); // 0 = all-time
 
-    return { offset, limit, project, platformSource };
+    return { offset, limit, project, platformSource, withinDays };
   }
 
   /**

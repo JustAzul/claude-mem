@@ -3,6 +3,7 @@ import { ThemeToggle } from './ThemeToggle';
 import { ThemePreference } from '../hooks/useTheme';
 import { GitHubStarsButton } from './GitHubStarsButton';
 import { useSpinningFavicon } from '../hooks/useSpinningFavicon';
+import { UI } from '../constants/ui';
 
 interface HeaderProps {
   isConnected: boolean;
@@ -121,6 +122,7 @@ export function Header({
             <option key={project} value={project}>{project}</option>
           ))}
         </select>
+        <span className="filter-tag" title={`Showing data from the last ${UI.DEFAULT_WITHIN_DAYS} days`}>Last {UI.DEFAULT_WITHIN_DAYS} days</span>
         <ThemeToggle
           preference={themePreference}
           onThemeChange={onThemeChange}

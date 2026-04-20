@@ -56,7 +56,8 @@ function usePaginationFor(endpoint: string, dataType: DataType, currentFilter: s
     // Build query params using current offset from ref
     const params = new URLSearchParams({
       offset: offsetRef.current.toString(),
-      limit: UI.PAGINATION_PAGE_SIZE.toString()
+      limit: UI.PAGINATION_PAGE_SIZE.toString(),
+      withinDays: UI.DEFAULT_WITHIN_DAYS.toString()
     });
 
     // Add project filter if present

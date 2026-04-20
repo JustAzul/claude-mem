@@ -75,10 +75,14 @@ export class PaginationHelper {
     };
   }
 
+  private epochCutoff(withinDays: number): number {
+    return Date.now() - withinDays * 86_400_000;
+  }
+
   /**
    * Get paginated observations
    */
-  getObservations(offset: number, limit: number, project?: string, platformSource?: string): PaginatedResult<Observation> {
+  getObservations(offset: number, limit: number, project?: string, platformSource?: string, withinDays = 30): PaginatedResult<Observation> {
     const db = this.dbManager.getSessionStore().db;
     let query = `
       SELECT
@@ -119,6 +123,10 @@ export class PaginationHelper {
       conditions.push(`COALESCE(s.platform_source, 'claude') = ?`);
       params.push(platformSource);
     }
+    if (withinDays > 0) {
+      conditions.push('o.created_at_epoch >= ?');
+      params.push(this.epochCutoff(withinDays));
+    }
     if (conditions.length > 0) {
       query += ` WHERE ${conditions.join(' AND ')}`;
     }
@@ -144,7 +152,7 @@ export class PaginationHelper {
   /**
    * Get paginated summaries
    */
-  getSummaries(offset: number, limit: number, project?: string, platformSource?: string): PaginatedResult<Summary> {
+  getSummaries(offset: number, limit: number, project?: string, platformSource?: string, withinDays = 30): PaginatedResult<Summary> {
     const db = this.dbManager.getSessionStore().db;
 
     let query = `
@@ -181,6 +189,10 @@ export class PaginationHelper {
       conditions.push(`COALESCE(s.platform_source, 'claude') = ?`);
       params.push(platformSource);
     }
+    if (withinDays > 0) {
+      conditions.push('ss.created_at_epoch >= ?');
+      params.push(this.epochCutoff(withinDays));
+    }
 
     if (conditions.length > 0) {
       query += ` WHERE ${conditions.join(' AND ')}`;
@@ -203,7 +215,7 @@ export class PaginationHelper {
   /**
    * Get paginated user prompts
    */
-  getPrompts(offset: number, limit: number, project?: string, platformSource?: string): PaginatedResult<UserPrompt> {
+  getPrompts(offset: number, limit: number, project?: string, platformSource?: string, withinDays = 30): PaginatedResult<UserPrompt> {
     const db = this.dbManager.getSessionStore().db;
 
     let query = `
@@ -234,6 +246,10 @@ export class PaginationHelper {
     if (platformSource) {
       conditions.push(`COALESCE(s.platform_source, 'claude') = ?`);
       params.push(platformSource);
+    }
+    if (withinDays > 0) {
+      conditions.push('up.created_at_epoch >= ?');
+      params.push(this.epochCutoff(withinDays));
     }
 
     if (conditions.length > 0) {
