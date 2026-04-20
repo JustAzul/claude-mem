@@ -43,3 +43,7 @@ CONTRIB_NOTES.md
 .playwright-mcp/
 # POC report outputs — contain real observation data (potential PII)
 scripts/poc-*-report.md
+
+# Local runtime state
+plugin/.cli-installed
+.claude/scheduled_tasks.lock
