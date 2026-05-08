@@ -6,7 +6,7 @@ import { MemoryAssistCalibrationView } from './memory-assist/MemoryAssistCalibra
 import { MemoryAssistTrace } from './memory-assist/MemoryAssistTrace';
 import { MemoryAssistActivityList } from './memory-assist/MemoryAssistActivityList';
 import { MemoryAssistMcpUsage } from './memory-assist/MemoryAssistMcpUsage';
-import type { FeedbackLabel, FeedbackStats, ObservationTraceDetail } from './memory-assist/shared';
+import type { FeedbackLabel, FeedbackStats, ObservationTraceDetail, SourceAssistStats } from './memory-assist/shared';
 import {
   DEBUG_REASONS,
   SCORECARD_WINDOW,
@@ -544,9 +544,9 @@ export function MemoryAssistPanel({
         safeThreshold={safeThreshold}
         windowDays={windowDays}
         overallStats={overallStats}
-        promptStats={promptStats}
-        summaryStats={summaryStats}
-        fileStats={fileStats}
+        promptStats={promptStats as SourceAssistStats}
+        summaryStats={summaryStats as SourceAssistStats}
+        fileStats={fileStats as SourceAssistStats}
         feedbackStats={feedbackStats}
         tokenEconomics={stats.tokenEconomics ?? null}
         howToReadDismissed={howToReadDismissed}

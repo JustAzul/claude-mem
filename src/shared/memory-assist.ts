@@ -166,6 +166,7 @@ export interface MemoryAssistSourceStats {
   taxonomyCorrectionCount: number | null;
   taxonomyCorrectionRate: number | null;
   shadowRanking: MemoryAssistShadowRankingStats | null;
+  recommendation?: MemoryAssistCalibrationRecommendation;
 }
 
 export interface MemoryAssistShadowRankingStats {

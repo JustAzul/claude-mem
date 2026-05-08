@@ -15,6 +15,7 @@ export interface ObservationTraceDetail {
   text?: string | null;
   facts?: string | null;
   created_at?: string | null;
+  created_at_epoch?: number | null;
   origin?: {
     pendingMessageId?: number | null;
     decisionId?: number | null;

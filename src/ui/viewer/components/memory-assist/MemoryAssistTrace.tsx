@@ -58,7 +58,7 @@ export function MemoryAssistTrace({
   const outcomeChipBg = 'color-mix(in srgb, var(--color-accent-primary) 10%, transparent)';
   const outcomeCardBg = 'color-mix(in srgb, var(--color-bg-card-hover) 72%, var(--color-bg-card))';
   const excludedObservationIds = React.useMemo(
-    () => new Set(event.traceItems.map((item) => item.observationId)),
+    () => new Set((event.traceItems ?? []).map((item) => item.observationId)),
     [event.traceItems]
   );
   const [focusedOutcomeKey, setFocusedOutcomeKey] = React.useState<string | null>(null);

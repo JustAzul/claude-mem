@@ -187,10 +187,11 @@ export function MemoryAssistCalibrationView({
     gap: 6,
   };
 
-  if (!dashboard || !selectedStats) {
+  if (!dashboard || !selectedStats || !selectedStats.recommendation) {
     return null;
   }
 
+  const recommendation = selectedStats.recommendation;
   const taxonomyIsMeaningfullyScoped = selectedSource === 'all';
 
   return (
@@ -281,7 +282,7 @@ export function MemoryAssistCalibrationView({
           gap: 10,
         }}
       >
-        {selectedStats.recommendation.kind === 'paused' ? (
+        {recommendation.kind === 'paused' ? (
           <RecommenderPausedBanner style={{ gridColumn: '1 / -1' }} />
         ) : (
           <div style={{ ...recommendationStyle, gridColumn: '1 / -1' }}>
@@ -289,20 +290,20 @@ export function MemoryAssistCalibrationView({
               <div>
                 <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Recommended next move</div>
                 <div style={{ fontSize: 24, fontWeight: 800, color: 'var(--color-text-header)' }}>
-                  {formatRecommendationLabel(selectedStats.recommendation.kind)}
+                  {formatRecommendationLabel(recommendation.kind)}
                 </div>
               </div>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)', textAlign: 'right' }}>
-                <div>{formatRecommendationScope(selectedStats)}</div>
+                <div>{formatRecommendationScope({ recommendation })}</div>
                 <div>
-                  Confidence {Math.round(selectedStats.recommendation.confidence * 100)}% · {selectedStats.recommendation.actionable} actionable decision{selectedStats.recommendation.actionable === 1 ? '' : 's'}
+                  Confidence {Math.round(recommendation.confidence * 100)}% · {recommendation.actionable} actionable decision{recommendation.actionable === 1 ? '' : 's'}
                 </div>
               </div>
             </div>
             <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', lineHeight: 1.45 }}>
-              {selectedStats.recommendation.reason}
-              {selectedStats.recommendation.suggestedDelta != null && selectedStats.recommendation.suggestedDelta !== 0
-                ? ` Suggested delta: ${selectedStats.recommendation.suggestedDelta > 0 ? '+' : ''}${selectedStats.recommendation.suggestedDelta.toFixed(2)}.`
+              {recommendation.reason}
+              {recommendation.suggestedDelta != null && recommendation.suggestedDelta !== 0
+                ? ` Suggested delta: ${recommendation.suggestedDelta > 0 ? '+' : ''}${recommendation.suggestedDelta.toFixed(2)}.`
                 : ''}
             </div>
           </div>
