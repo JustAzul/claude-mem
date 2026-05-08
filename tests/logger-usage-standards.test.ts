@@ -31,6 +31,13 @@ const EXCLUDED_PATTERNS = [
   /utils\/worktree\.ts$/,  // Worktree detection utility uses console.warn for startup diagnostics without logger dependency
   /utils\/project-filter\.ts$/,  // Project filter utility uses console.warn for pattern validation errors
   /shared\/plugin-state\.ts$/,  // Plugin state reader uses console.error to avoid circular logger dependency at startup
+  /server\/runtime\/ServerBetaService\.ts$/,  // CLI entry (runServerBetaCli) uses console.log for user-facing daemon control output
+  /services\/worker\/http\/middleware\/validateBody\.ts$/,  // Tiny middleware (no I/O); throws errors that bubble to caller's logger
+  /services\/worker\/search\/errors\.ts$/,  // Pure error classes
+  /services\/worker\/provider-errors\.ts$/,  // Pure error classes
+  /services\/worker\/RateLimitStore\.ts$/,  // Pure in-memory store; errors bubble to caller's logger
+  /services\/worker\/RestartGuard\.ts$/,  // Pure flag/state guard; no I/O
+  /services\/worker\/events\/SessionEventBroadcaster\.ts$/,  // Pure pub/sub mux; errors bubble to caller's logger
 ];
 
 const HIGH_PRIORITY_PATTERNS = [
