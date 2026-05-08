@@ -140,19 +140,4 @@ export interface Stats {
   worker?: WorkerStats;
   database?: DatabaseStats;
   tokenEconomics?: TokenEconomicsStats;
-  implicitUseRate?: number | null;
-  implicitUseCounts?: {
-    file_reuse: number;
-    content_cited: number;
-    no_overlap: number;
-    not_yet_computed: number;
-  } | null;
-  recentTrend?: {
-    sinceEpoch: number;
-    totalDecisions: number;
-    injectRate: number | null;
-    likelyHelpedRate: number | null;
-    injected: number;
-    actionable: number;
-  } | null;
 }

@@ -51,7 +51,10 @@ function repairMalformedSchema(db: Database): void {
 
     db.close();
 
-    const scriptPath = join(tmpdir(), `claude-mem-repair-${Date.now()}.py`);
+    const scriptPath = join(
+      tmpdir(),
+      `claude-mem-repair-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}.py`,
+    );
     try {
       writeFileSync(scriptPath, `
 import sqlite3, sys

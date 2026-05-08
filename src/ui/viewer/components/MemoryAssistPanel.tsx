@@ -17,6 +17,16 @@ import {
 const COLLAPSED_STORAGE_KEY = 'claude-mem.memoryAssistPanel.collapsed';
 const HOW_TO_READ_DISMISSED_KEY = 'claude-mem.memoryAssistPanel.howToReadDismissed';
 
+// The two source-stats shapes only diverge on `taxonomyCorrectionCount`
+// (null vs undefined) and an extra `verdicts` field on the server shape.
+// Normalize to SourceAssistStats so the consumer doesn't need a type guard.
+function toSourceAssistStats(s: MemoryAssistSourceStats | SourceAssistStats): SourceAssistStats {
+  return {
+    ...(s as SourceAssistStats),
+    taxonomyCorrectionCount: s.taxonomyCorrectionCount ?? undefined,
+  };
+}
+
 function readCollapsedFromStorage(): boolean {
   try {
     const raw = localStorage.getItem(COLLAPSED_STORAGE_KEY);
@@ -172,13 +182,6 @@ export function MemoryAssistPanel({
         helpRate: feedbackStats.helpRate,
       }
     : recentOverallStats;
-  // The two source-stats shapes only diverge on `taxonomyCorrectionCount`
-  // (null vs undefined) and an extra `verdicts` field on the server shape.
-  // Normalize to SourceAssistStats so the consumer doesn't need a type guard.
-  const toSourceAssistStats = (s: MemoryAssistSourceStats | SourceAssistStats): SourceAssistStats => ({
-    ...(s as SourceAssistStats),
-    taxonomyCorrectionCount: s.taxonomyCorrectionCount ?? undefined,
-  });
   const promptStats = toSourceAssistStats(feedbackStats?.sourceStats?.semantic_prompt ?? recentPromptStats);
   const summaryStats = toSourceAssistStats(feedbackStats?.sourceStats?.semantic_summary ?? recentSummaryStats);
   const fileStats = toSourceAssistStats(feedbackStats?.sourceStats?.file_context ?? recentFileStats);
@@ -563,9 +566,9 @@ export function MemoryAssistPanel({
           setSelectedTraceKey(eventKey(latest, 0));
           setActiveTab('activity');
         }}
-        implicitUseRate={stats.implicitUseRate ?? null}
-        implicitUseCounts={stats.implicitUseCounts ?? null}
-        recentTrend={stats.recentTrend ?? null}
+        implicitUseRate={feedbackStats?.implicitUseRate ?? null}
+        implicitUseCounts={feedbackStats?.implicitUseCounts ?? null}
+        recentTrend={feedbackStats?.recentTrend ?? null}
       />
       )}
 
