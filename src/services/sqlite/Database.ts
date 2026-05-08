@@ -1,9 +1,13 @@
 import { Database } from 'bun:sqlite';
+import { execFileSync } from 'child_process';
+import { existsSync, unlinkSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { DATA_DIR, DB_PATH, ensureDir } from '../../shared/paths.js';
 import { logger } from '../../utils/logger.js';
 import { MigrationRunner } from './migrations/runner.js';
 
-const SQLITE_MMAP_SIZE_BYTES = 256 * 1024 * 1024; 
+const SQLITE_MMAP_SIZE_BYTES = 256 * 1024 * 1024;
 const SQLITE_CACHE_SIZE_PAGES = 10_000;
 
 export interface Migration {
@@ -14,6 +18,84 @@ export interface Migration {
 
 let dbInstance: Database | null = null;
 
+// Repair malformed schema before migrations run. Handles cross-version sync
+// (newer DB synced to older claude-mem) where an index references a column the
+// current schema doesn't have. SQLite throws "malformed database schema" on
+// any access — including the migrations that would fix it. bun:sqlite can't
+// DELETE FROM sqlite_master even with writable_schema, so we shell out to
+// Python's sqlite3 module which can.
+function repairMalformedSchema(db: Database): void {
+  try {
+    db.query('SELECT name FROM sqlite_master WHERE type = "table" LIMIT 1').all();
+    return;
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes('malformed database schema')) {
+      throw error;
+    }
+
+    logger.warn('DB', 'Detected malformed database schema, attempting repair', { error: message });
+
+    const match = message.match(/malformed database schema \(([^)]+)\)/);
+    if (!match) {
+      logger.error('DB', 'Could not parse malformed schema error, cannot auto-repair', { error: message });
+      throw error;
+    }
+
+    const objectName = match[1];
+    const dbPath = db.filename;
+    if (!dbPath || dbPath === ':memory:' || dbPath === '') {
+      logger.error('DB', 'Cannot auto-repair in-memory database');
+      throw error;
+    }
+
+    db.close();
+
+    const scriptPath = join(tmpdir(), `claude-mem-repair-${Date.now()}.py`);
+    try {
+      writeFileSync(scriptPath, `
+import sqlite3, sys
+db_path = sys.argv[1]
+obj_name = sys.argv[2]
+c = sqlite3.connect(db_path)
+c.execute('PRAGMA writable_schema = ON')
+c.execute('DELETE FROM sqlite_master WHERE name = ?', (obj_name,))
+c.execute('PRAGMA writable_schema = OFF')
+has_sv = c.execute(
+  "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_versions'"
+).fetchone()[0]
+if has_sv:
+  c.execute('DELETE FROM schema_versions')
+c.commit()
+c.close()
+`);
+      execFileSync('python3', [scriptPath, dbPath, objectName], { timeout: 10000 });
+      logger.info('DB', `Dropped orphaned schema object "${objectName}" and reset migration versions; all migrations will re-run.`);
+    } catch (pyError: unknown) {
+      const pyMessage = pyError instanceof Error ? pyError.message : String(pyError);
+      logger.error('DB', 'Python sqlite3 repair failed', { error: pyMessage });
+      throw new Error(`Schema repair failed: ${message}. Python repair error: ${pyMessage}`);
+    } finally {
+      if (existsSync(scriptPath)) unlinkSync(scriptPath);
+    }
+  }
+}
+
+function repairMalformedSchemaWithReopen(dbPath: string, db: Database): Database {
+  try {
+    db.query('SELECT name FROM sqlite_master WHERE type = "table" LIMIT 1').all();
+    return db;
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes('malformed database schema')) {
+      throw error;
+    }
+    repairMalformedSchema(db);
+    const newDb = new Database(dbPath, { create: true, readwrite: true });
+    return repairMalformedSchemaWithReopen(dbPath, newDb);
+  }
+}
+
 export class ClaudeMemDatabase {
   public db: Database;
 
@@ -23,6 +105,12 @@ export class ClaudeMemDatabase {
     }
 
     this.db = new Database(dbPath, { create: true, readwrite: true });
+
+    // Repair malformed schema BEFORE PRAGMA — pragmas fail on a corrupted
+    // schema. May close and reopen the connection if repair is needed.
+    if (dbPath !== ':memory:') {
+      this.db = repairMalformedSchemaWithReopen(dbPath, this.db);
+    }
 
     this.db.run('PRAGMA journal_mode = WAL');
     this.db.run('PRAGMA synchronous = NORMAL');
