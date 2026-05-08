@@ -104,7 +104,7 @@ export function recordMemoryAssistOutcomeSignal(
   signal: MemoryAssistOutcomeSignal
 ): MemoryAssistOutcomeSignal {
   const timestamp = signal.timestamp ?? Date.now();
-  logger.debug(`[memory-assist-outcomes] recording ${signal.action} outcome for ${signal.source ?? 'unknown source'}`);
+  logger.debug('DB', `[memory-assist-outcomes] recording ${signal.action} outcome for ${signal.source ?? 'unknown source'}`);
   const result = db.prepare(`
     INSERT INTO memory_assist_outcome_signals (
       decision_id,
@@ -152,7 +152,7 @@ export function recordMemoryAssistOutcomeSignal(
   `).get(Number(result.lastInsertRowid)) as OutcomeRow | undefined;
 
   const hydrated = row ? hydrateOutcome(row) : { ...signal, id: Number(result.lastInsertRowid), timestamp };
-  logger.debug(`[memory-assist-outcomes] stored outcome signal ${hydrated.id ?? 'unknown'}`);
+  logger.debug('DB', `[memory-assist-outcomes] stored outcome signal ${hydrated.id ?? 'unknown'}`);
   return hydrated;
 }
 
@@ -173,7 +173,7 @@ export function attachGeneratedObservationsToOutcomeSignal(
     `).get(pendingMessageId) as Pick<OutcomeRow, 'id' | 'generated_observation_ids_json'> | undefined;
 
     if (!row) {
-      logger.debug(`[memory-assist-outcomes] no outcome signal found for pending message ${pendingMessageId}`);
+      logger.debug('DB', `[memory-assist-outcomes] no outcome signal found for pending message ${pendingMessageId}`);
       return [];
     }
 
@@ -186,7 +186,7 @@ export function attachGeneratedObservationsToOutcomeSignal(
       WHERE id = ?
     `).run(serializeJson(merged), row.id);
 
-    logger.debug(`[memory-assist-outcomes] attached ${observationIds.length} observations to pending message ${pendingMessageId}`);
+    logger.debug('DB', `[memory-assist-outcomes] attached ${observationIds.length} observations to pending message ${pendingMessageId}`);
     return merged;
   })();
 }
@@ -211,6 +211,6 @@ export function getOutcomeSignalsForDecisionIds(
     acc[decisionId].push(hydrateOutcome(row));
     return acc;
   }, {});
-  logger.debug(`[memory-assist-outcomes] loaded ${rows.length} outcome signals for ${decisionIds.length} decisions`);
+  logger.debug('DB', `[memory-assist-outcomes] loaded ${rows.length} outcome signals for ${decisionIds.length} decisions`);
   return grouped;
 }

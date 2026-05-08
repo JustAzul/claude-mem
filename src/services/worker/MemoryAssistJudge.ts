@@ -20,6 +20,7 @@ function finalizeJudgeResult(
   result: MemoryAssistJudgeResult
 ): MemoryAssistJudgeResult {
   logger.debug(
+    'SEARCH',
     `[MemoryAssistJudge] decision=${decision.id ?? 'new'} source=${decision.source} status=${decision.status} verdict=${result.verdict} confidence=${result.confidence.toFixed(2)}`
   );
   return result;

@@ -79,6 +79,6 @@ export function getMemoryAssistCalibrationSnapshot(db: Database): MemoryAssistCa
     }
   }
 
-  logger.debug(`[memory-assist-calibration] loaded ${rows.length} calibration rows`);
+  logger.debug('DB', `[memory-assist-calibration] loaded ${rows.length} calibration rows`);
   return snapshot;
 }

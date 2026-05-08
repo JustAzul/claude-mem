@@ -43,7 +43,7 @@ export class MemoryAssistRoutes extends BaseRouteHandler {
 
     const event = this.dbManager.getSessionStore().recordMemoryAssistDecision(report);
     this.tracker.record(event);
-    logger.debug(`[MemoryAssistRoutes] recorded memory assist decision ${event.id ?? 'unknown'} (${event.source}/${event.status})`);
+    logger.debug('HTTP', `[MemoryAssistRoutes] recorded memory assist decision ${event.id ?? 'unknown'} (${event.source}/${event.status})`);
     res.json({ ok: true, event });
   });
 
@@ -52,7 +52,7 @@ export class MemoryAssistRoutes extends BaseRouteHandler {
     const windowDays = Number.isFinite(parsedWindowDays)
       ? Math.min(Math.max(parsedWindowDays, 1), 365)
       : 30;
-    logger.debug(`[MemoryAssistRoutes] loading dashboard stats for ${windowDays}d window`);
+    logger.debug('HTTP', `[MemoryAssistRoutes] loading dashboard stats for ${windowDays}d window`);
     res.json(this.dbManager.getSessionStore().getMemoryAssistDashboard(windowDays));
   });
 
@@ -77,12 +77,12 @@ export class MemoryAssistRoutes extends BaseRouteHandler {
       contentSessionId,
     });
 
-    logger.debug(`[MemoryAssistRoutes] returning ${decisions.length} decisions (limit=${limit}, windowDays=${windowDays})`);
+    logger.debug('HTTP', `[MemoryAssistRoutes] returning ${decisions.length} decisions (limit=${limit}, windowDays=${windowDays})`);
     res.json({ decisions });
   });
 
   private handleGetCalibration = this.wrapHandler((req: Request, res: Response): void => {
-    logger.debug('[MemoryAssistRoutes] loading memory assist calibration snapshot');
+    logger.debug('HTTP', '[MemoryAssistRoutes] loading memory assist calibration snapshot');
     res.json(this.dbManager.getSessionStore().getMemoryAssistCalibrationSnapshot());
   });
 
@@ -94,7 +94,7 @@ export class MemoryAssistRoutes extends BaseRouteHandler {
     }
 
     const storedSignal = this.dbManager.getSessionStore().recordMemoryAssistOutcomeSignal(signal);
-    logger.debug(`[MemoryAssistRoutes] recorded outcome signal ${storedSignal.id ?? 'unknown'} for ${storedSignal.source ?? 'unknown source'}`);
+    logger.debug('HTTP', `[MemoryAssistRoutes] recorded outcome signal ${storedSignal.id ?? 'unknown'} for ${storedSignal.source ?? 'unknown source'}`);
     res.json({ ok: true, signal: storedSignal });
   });
 
@@ -136,10 +136,10 @@ export class MemoryAssistRoutes extends BaseRouteHandler {
       metadata
     );
     if (Number.isInteger(decisionId)) {
-      this.dbManager.getSessionStore().attachMemoryAssistDecisionFeedback(decisionId, label);
+      this.dbManager.getSessionStore().attachMemoryAssistDecisionFeedback(decisionId ?? 0, label);
     }
 
-    logger.debug(`[MemoryAssistRoutes] recorded ${label} feedback for ${observationIds.length} observations`);
+    logger.debug('HTTP', `[MemoryAssistRoutes] recorded ${label} feedback for ${observationIds.length} observations`);
     res.json({ ok: true });
   });
 }

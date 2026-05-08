@@ -63,6 +63,7 @@ export class ExperimentalRanker implements SemanticRanker {
       })
       .slice(0, limit);
     logger.debug(
+      'SEARCH',
       `[ExperimentalRanker] ranked ${ranked.length}/${candidates.length} candidates at threshold ${threshold} (limit=${limit})`
     );
     return ranked;

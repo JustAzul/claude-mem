@@ -7,28 +7,24 @@ interface ObservationCardProps {
   observation: Observation;
 }
 
-// Helper to strip project root from file paths
 function stripProjectRoot(filePath: string): string {
-  // Try to extract relative path by finding common project markers
   const markers = ['/Scripts/', '/src/', '/plugin/', '/docs/'];
 
   for (const marker of markers) {
     const index = filePath.indexOf(marker);
     if (index !== -1) {
-      // Keep the marker and everything after it
       return filePath.substring(index + 1);
     }
   }
 
-  // Fallback: if path contains project name, strip everything before it
   const projectIndex = filePath.indexOf('claude-mem/');
   if (projectIndex !== -1) {
     return filePath.substring(projectIndex + 'claude-mem/'.length);
   }
 
   // No recognised marker: return the original path unchanged.
-  // The previous "last 3 segments" fallback produced misleading output for
-  // paths that share no project structure (e.g. desktop exports, temp files).
+  // The "last 3 segments" fallback produced misleading output for paths that
+  // share no project structure (e.g. desktop exports, temp files).
   return filePath;
 }
 
@@ -38,13 +34,11 @@ export function ObservationCard({ observation }: ObservationCardProps) {
   const [, setTraceId] = useTraceUrlParam();
   const date = formatDate(observation.created_at_epoch);
 
-  // Parse JSON fields
   const facts = observation.facts ? JSON.parse(observation.facts) : [];
   const concepts = observation.concepts ? JSON.parse(observation.concepts) : [];
   const filesRead = observation.files_read ? JSON.parse(observation.files_read).map(stripProjectRoot) : [];
   const filesModified = observation.files_modified ? JSON.parse(observation.files_modified).map(stripProjectRoot) : [];
 
-  // Show facts toggle if there are facts, concepts, or files
   const hasFactsContent = facts.length > 0 || concepts.length > 0 || filesRead.length > 0 || filesModified.length > 0;
 
   return (
@@ -71,7 +65,7 @@ export function ObservationCard({ observation }: ObservationCardProps) {
               className={`view-mode-toggle ${showFacts ? 'active' : ''}`}
               onClick={() => {
                 setShowFacts(!showFacts);
-                if (!showFacts) setShowNarrative(false); // Turn off narrative when turning on facts
+                if (!showFacts) setShowNarrative(false); 
               }}
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -86,7 +80,7 @@ export function ObservationCard({ observation }: ObservationCardProps) {
               className={`view-mode-toggle ${showNarrative ? 'active' : ''}`}
               onClick={() => {
                 setShowNarrative(!showNarrative);
-                if (!showNarrative) setShowFacts(false); // Turn off facts when turning on narrative
+                if (!showNarrative) setShowFacts(false); 
               }}
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

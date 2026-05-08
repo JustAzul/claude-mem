@@ -49,6 +49,7 @@ export function recordObservationTypeCorrection(
   }
 ): void {
   logger.debug(
+    'DB',
     `[memory-assist-taxonomy] ${input.originalType} -> ${input.normalizedType} (${input.strategy}) in mode=${input.modeId}`
   );
   db.prepare(`
@@ -117,6 +118,6 @@ export function getObservationTypeCorrectionStats(
       count: row.count,
     })),
   };
-  logger.debug(`[memory-assist-taxonomy] loaded correction stats for ${windowDays}d window (${stats.total} corrections)`);
+  logger.debug('DB', `[memory-assist-taxonomy] loaded correction stats for ${windowDays}d window (${stats.total} corrections)`);
   return stats;
 }

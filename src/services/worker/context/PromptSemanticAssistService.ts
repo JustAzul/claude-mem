@@ -69,7 +69,7 @@ export class PromptSemanticAssistService {
     };
 
     if (query.length < MIN_QUERY_LENGTH) {
-      logger.debug(`[PromptSemanticAssistService] skipped semantic recall: query too short (${query.length} chars)`);
+      logger.debug('SEARCH', `[PromptSemanticAssistService] skipped semantic recall: query too short (${query.length} chars)`);
       return {
         context: '',
         count: 0,
@@ -82,7 +82,7 @@ export class PromptSemanticAssistService {
     }
 
     if (!this.chromaSync) {
-      logger.warn('[PromptSemanticAssistService] semantic recall unavailable because Chroma sync is not configured');
+      logger.warn('SEARCH', '[PromptSemanticAssistService] semantic recall unavailable because Chroma sync is not configured');
       return {
         context: '',
         count: 0,
@@ -103,7 +103,7 @@ export class PromptSemanticAssistService {
       const chromaResults = await this.chromaSync.queryChroma(query, lookaheadLimit, whereFilter);
 
       if (chromaResults.ids.length === 0) {
-        logger.debug('[PromptSemanticAssistService] skipped semantic recall: no matches returned by Chroma');
+        logger.debug('SEARCH', '[PromptSemanticAssistService] skipped semantic recall: no matches returned by Chroma');
         return {
           context: '',
           count: 0,
@@ -135,7 +135,7 @@ export class PromptSemanticAssistService {
         if (recentIds.size > 0) {
           selectedCandidates = selectedCandidates.filter(c => !recentIds.has(Number(c.id)));
           if (selectedCandidates.length === 0) {
-            logger.debug(`[PromptSemanticAssistService] skipped semantic recall: all candidates recently injected (window=${DEDUP_WINDOW})`);
+            logger.debug('SEARCH', `[PromptSemanticAssistService] skipped semantic recall: all candidates recently injected (window=${DEDUP_WINDOW})`);
             return {
               context: '',
               count: 0,
@@ -154,6 +154,7 @@ export class PromptSemanticAssistService {
       if (selectedCandidates.length === 0) {
         const distances = candidates.map(candidate => candidate.distance).filter(Number.isFinite);
         logger.debug(
+          'SEARCH',
           `[PromptSemanticAssistService] skipped semantic recall: ${candidates.length} candidates but none under threshold ${threshold}`
         );
         return {
@@ -184,7 +185,7 @@ export class PromptSemanticAssistService {
           .slice(0, limit);
 
         if (summaries.length === 0) {
-          logger.warn('[PromptSemanticAssistService] skipped summary recall: hydration miss');
+          logger.warn('SEARCH', '[PromptSemanticAssistService] skipped summary recall: hydration miss');
           return {
             context: '',
             count: 0,
@@ -238,7 +239,7 @@ export class PromptSemanticAssistService {
       const selectedObservations = rankedMatches.map((match) => match.observation);
 
       if (selectedObservations.length === 0) {
-        logger.warn('[PromptSemanticAssistService] skipped semantic recall: selected candidates could not be hydrated from SQLite');
+        logger.warn('SEARCH', '[PromptSemanticAssistService] skipped semantic recall: selected candidates could not be hydrated from SQLite');
         return {
           context: '',
           count: 0,
@@ -254,7 +255,9 @@ export class PromptSemanticAssistService {
 
       const lines: string[] = ['## Relevant Past Work (semantic match)\n'];
       for (const observation of selectedObservations) {
-        const date = observation.created_at?.slice(0, 10) || '';
+        const date = observation.created_at_epoch
+          ? new Date(observation.created_at_epoch).toISOString().slice(0, 10)
+          : '';
         lines.push(`### ${observation.title || 'Observation'} (${date})`);
         if (observation.narrative) {
           lines.push(observation.narrative);
@@ -269,6 +272,7 @@ export class PromptSemanticAssistService {
 
       const selectedDistances = rankedMatches.map(candidate => candidate.distance).filter(Number.isFinite);
       logger.debug(
+        'SEARCH',
         `[PromptSemanticAssistService] injected ${selectedObservations.length} semantic memories from ${candidates.length} candidates`
       );
       return {
@@ -312,7 +316,7 @@ export class PromptSemanticAssistService {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.warn(`[PromptSemanticAssistService] semantic recall failed: ${message}`);
+      logger.warn('SEARCH', `[PromptSemanticAssistService] semantic recall failed: ${message}`);
       return {
         context: '',
         count: 0,

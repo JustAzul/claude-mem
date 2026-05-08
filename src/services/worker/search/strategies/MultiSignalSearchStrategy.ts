@@ -83,8 +83,8 @@ export class MultiSignalSearchStrategy extends BaseSearchStrategy implements Sea
     const overFetchOptions: StrategySearchOptions = { ...options, limit: internalLimit };
 
     // Step 1: Parallel fetch from both strategies
-    let semanticResult: StrategySearchResult;
-    let ftsResult: StrategySearchResult;
+    let semanticResult: StrategySearchResult | null;
+    let ftsResult: StrategySearchResult | null;
 
     try {
       [semanticResult, ftsResult] = await Promise.all([

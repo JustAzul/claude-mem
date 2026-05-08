@@ -24,8 +24,6 @@ import { SessionManager } from './SessionManager.js';
 import {
   isAbortError,
   processAgentResponse,
-  shouldFallbackToClaude,
-  type FallbackAgent,
   type ToolContext,
   type WorkerRef
 } from './agents/index.js';
@@ -56,15 +54,10 @@ interface OpenAIChatResponse {
 export class CustomOpenAIAgent {
   private dbManager: DatabaseManager;
   private sessionManager: SessionManager;
-  private fallbackAgent: FallbackAgent | null = null;
 
   constructor(dbManager: DatabaseManager, sessionManager: SessionManager) {
     this.dbManager = dbManager;
     this.sessionManager = sessionManager;
-  }
-
-  setFallbackAgent(agent: FallbackAgent): void {
-    this.fallbackAgent = agent;
   }
 
   async startSession(session: ActiveSession, worker?: WorkerRef): Promise<void> {
@@ -227,7 +220,7 @@ Respond with ONLY this XML block — no other text, no <observation> tags:
   <notes>[Additional insights about current progress]</notes>
 </summary>`;
 
-          const summaryHistory: ConversationMessage[] = [
+          const summaryHistory: OpenAIMessage[] = [
             { role: 'system', content: 'You are a concise progress note-taker. Output ONLY a single <summary>...</summary> XML block. Never output <observation> tags.' },
             { role: 'user', content: minimalSummaryPrompt }
           ];
@@ -280,14 +273,6 @@ Respond with ONLY this XML block — no other text, no <observation> tags:
         throw error;
       }
 
-      if (shouldFallbackToClaude(error) && this.fallbackAgent) {
-        logger.warn('SDK', 'Custom provider failed, falling back to Claude SDK', {
-          sessionDbId: session.sessionDbId,
-          error: error instanceof Error ? error.message : String(error)
-        });
-        return this.fallbackAgent.startSession(session, worker);
-      }
-
       logger.failure('SDK', 'Custom OpenAI agent error', { sessionDbId: session.sessionDbId }, error as Error);
       throw error;
     }
@@ -337,12 +322,12 @@ Respond with ONLY this XML block — no other text, no <observation> tags:
   }
 
   private async query(
-    history: ConversationMessage[],
+    history: ConversationMessage[] | OpenAIMessage[],
     apiKey: string,
     baseUrl: string,
     model: string
   ): Promise<{ content: string; tokensUsed?: number }> {
-    const truncated = this.truncateHistory(history);
+    const truncated = this.truncateHistory(history as ConversationMessage[]);
     const messages = this.conversationToMessages(truncated);
     const url = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
 

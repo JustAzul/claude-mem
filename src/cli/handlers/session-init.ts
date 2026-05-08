@@ -1,54 +1,34 @@
-/**
- * Session Init Handler - UserPromptSubmit
- *
- * Extracted from new-hook.ts - initializes session and starts SDK agent.
- */
 
 import type { EventHandler, NormalizedHookInput, HookResult } from '../types.js';
-import { ensureWorkerRunning, workerHttpRequest } from '../../shared/worker-utils.js';
+import { executeWithWorkerFallback, isWorkerFallback, workerHttpRequest } from '../../shared/worker-utils.js';
 import { getProjectContext } from '../../utils/project-name.js';
 import { logger } from '../../utils/logger.js';
 import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
-import { isProjectExcluded } from '../../utils/project-filter.js';
-import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
-import { USER_SETTINGS_PATH } from '../../shared/paths.js';
+import { shouldTrackProject } from '../../shared/should-track-project.js';
+import { loadFromFileOnce } from '../../shared/hook-settings.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
 import { reportMemoryAssist } from './memory-assist-report.js';
 import { extractLastMessage } from '../../shared/transcript-parser.js';
+import { isInternalProtocolPayload } from '../../utils/tag-stripping.js';
 
-async function fetchSemanticContext(
-  prompt: string,
-  project: string,
-  limit: string,
-  sessionDbId: number
-): Promise<string> {
-  const semanticRes = await workerHttpRequest('/api/context/semantic', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ q: prompt, project, limit })
-  });
-  if (semanticRes.ok) {
-    const data = await semanticRes.json() as { context: string; count: number };
-    if (data.context) {
-      logger.debug('HOOK', `Semantic injection: ${data.count} observations for prompt`, { sessionId: sessionDbId, count: data.count });
-      return data.context;
-    }
-  }
-  return '';
+interface SessionInitResponse {
+  sessionDbId: number;
+  promptNumber: number;
+  skipped?: boolean;
+  reason?: string;
+  contextInjected?: boolean;
+}
+
+interface SemanticContextResponse {
+  context: string;
+  count: number;
 }
 
 export const sessionInitHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
-    // Ensure worker is running before any other logic
-    const workerReady = await ensureWorkerRunning();
-    if (!workerReady) {
-      // Worker not available - skip session init gracefully
-      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
-    }
+    const { sessionId, prompt: rawPrompt } = input;
+    const cwd = input.cwd ?? process.cwd();  
 
-    const { sessionId, cwd, prompt: rawPrompt } = input;
-
-    // Guard: Codex CLI and other platforms may not provide a session_id (#744)
     if (!sessionId) {
       logger.warn('HOOK', 'session-init: No sessionId provided, skipping (Codex CLI or unknown platform)');
       return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
@@ -57,9 +37,7 @@ export const sessionInitHandler: EventHandler = {
     const project = getProjectContext(cwd).primary;
     const platformSource = normalizePlatformSource(input.platform);
 
-    // Check if project is excluded from tracking
-    const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
-    if (cwd && isProjectExcluded(cwd, settings.CLAUDE_MEM_EXCLUDED_PROJECTS)) {
+    if (!shouldTrackProject(cwd)) {
       logger.info('HOOK', 'Project excluded from tracking', { cwd });
       await reportMemoryAssist({
         source: 'semantic_prompt',
@@ -72,46 +50,44 @@ export const sessionInitHandler: EventHandler = {
       return { continue: true, suppressOutput: true };
     }
 
-    // Handle image-only prompts (where text prompt is empty/undefined)
-    // Use placeholder so sessions still get created and tracked for memory
+    if (rawPrompt && isInternalProtocolPayload(rawPrompt)) {
+      logger.debug('HOOK', 'session-init: skipping internal protocol payload', {
+        preview: rawPrompt.slice(0, 80),
+      });
+      return { continue: true, suppressOutput: true };
+    }
+
     const prompt = (!rawPrompt || !rawPrompt.trim()) ? '[media prompt]' : rawPrompt;
 
     logger.debug('HOOK', 'session-init: Calling /api/sessions/init', { contentSessionId: sessionId, project });
 
-    // Initialize session via HTTP - handles DB operations and privacy checks
-    const initResponse = await workerHttpRequest('/api/sessions/init', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const initResult = await executeWithWorkerFallback<SessionInitResponse>(
+      '/api/sessions/init',
+      'POST',
+      {
         contentSessionId: sessionId,
         project,
         prompt,
-        platformSource
-      })
-    });
+        platformSource,
+      },
+    );
 
-    if (!initResponse.ok) {
-      // Log but don't throw - a worker 500 should not block the user's prompt
-      logger.failure('HOOK', `Session initialization failed: ${initResponse.status}`, { contentSessionId: sessionId, project });
+    if (isWorkerFallback(initResult)) {
       return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
     }
 
-    const initResult = await initResponse.json() as {
-      sessionDbId: number;
-      promptNumber: number;
-      skipped?: boolean;
-      reason?: string;
-      contextInjected?: boolean;
-    };
+    if (typeof initResult?.sessionDbId !== 'number') {
+      logger.failure('HOOK', 'Session initialization returned malformed response', { contentSessionId: sessionId, project });
+      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+    }
+
     const sessionDbId = initResult.sessionDbId;
     const promptNumber = initResult.promptNumber;
 
     logger.debug('HOOK', 'session-init: Received from /api/sessions/init', { sessionDbId, promptNumber, skipped: initResult.skipped, contextInjected: initResult.contextInjected });
 
-    // Debug-level alignment log for detailed tracing
     logger.debug('HOOK', `[ALIGNMENT] Hook Entry | contentSessionId=${sessionId} | prompt#=${promptNumber} | sessionDbId=${sessionDbId}`);
 
-    // Check if prompt was entirely private (worker performs privacy check)
     if (initResult.skipped && initResult.reason === 'private') {
       logger.info('HOOK', `INIT_COMPLETE | sessionDbId=${sessionDbId} | promptNumber=${promptNumber} | skipped=true | reason=private`, {
         sessionId: sessionDbId
@@ -157,6 +133,7 @@ export const sessionInitHandler: EventHandler = {
     // Semantic context injection: query Chroma for relevant past observations
     // and inject as additionalContext so Claude receives relevant memory each prompt.
     // Controlled by CLAUDE_MEM_SEMANTIC_INJECT setting (default: false).
+    const settings = loadFromFileOnce();
     const semanticInject =
       String(settings.CLAUDE_MEM_SEMANTIC_INJECT).toLowerCase() === 'true';
     let additionalContext = '';
@@ -303,7 +280,6 @@ export const sessionInitHandler: EventHandler = {
       sessionId: sessionDbId
     });
 
-    // Return with semantic context if available
     if (additionalContext) {
       return {
         continue: true,

@@ -149,7 +149,7 @@ export function recordMemoryAssistDecision(
   }
 ): MemoryAssistDecisionRecord {
   const now = report.timestamp ?? Date.now();
-  logger.debug(`[memory-assist-decisions] recording ${report.source}/${report.status} decision (${report.reason})`);
+  logger.debug('DB', `[memory-assist-decisions] recording ${report.source}/${report.status} decision (${report.reason})`);
   const insert = db.prepare(`
     INSERT INTO memory_assist_decisions (
       source,
@@ -212,7 +212,7 @@ export function recordMemoryAssistDecision(
     now
   );
   const decision = getMemoryAssistDecisionById(db, Number(result.lastInsertRowid))!;
-  logger.debug(`[memory-assist-decisions] stored decision ${decision.id ?? 'unknown'}`);
+  logger.debug('DB', `[memory-assist-decisions] stored decision ${decision.id ?? 'unknown'}`);
   return decision;
 }
 
@@ -247,7 +247,7 @@ export function getRecentMemoryAssistDecisions(
   // against a raw count of 42 claude-mem injections in the same 30d window.)
   const limit = Math.min(Math.max(options.limit ?? 20, 1), 10_000);
   const conditions: string[] = [];
-  const params: unknown[] = [];
+  const params: any[] = [];
 
   if (options.windowDays) {
     conditions.push('created_at_epoch >= ?');
@@ -276,7 +276,7 @@ export function getRecentMemoryAssistDecisions(
   `).all(...params) as DecisionRow[];
 
   const decisions = rows.map(hydrateDecision);
-  logger.debug(`[memory-assist-decisions] loaded ${decisions.length} recent decisions (limit=${limit})`);
+  logger.debug('DB', `[memory-assist-decisions] loaded ${decisions.length} recent decisions (limit=${limit})`);
   return decisions;
 }
 

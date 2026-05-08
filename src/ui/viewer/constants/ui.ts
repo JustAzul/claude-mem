@@ -1,9 +1,4 @@
-/**
- * UI-related constants
- * Pagination, intersection observer settings, and other UI configuration
- */
 export const UI = {
-  /** Number of observations to load per page */
   PAGINATION_PAGE_SIZE: 50,
 
   /** Default time window for paginated queries (0 = all-time) */

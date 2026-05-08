@@ -3,15 +3,17 @@ import { PendingMessageStore, PersistentPendingMessage } from '../sqlite/Pending
 import type { PendingMessageWithId } from '../worker-types.js';
 import { logger } from '../../utils/logger.js';
 
-const IDLE_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes
+const IDLE_TIMEOUT_MS = 3 * 60 * 1000;
 const DEFAULT_SETTLING_WINDOW_MS = 800;
 
 export interface CreateIteratorOptions {
   sessionDbId: number;
   signal: AbortSignal;
-  /** Called when idle timeout occurs - should trigger abort to kill subprocess */
   onIdleTimeout?: () => void;
-  /** Milliseconds to wait after first message arrives, letting bursts accumulate (default: 800) */
+  idleTimeoutMs?: number;
+  claimRetryDelayMs?: number;
+  maxClaimFailures?: number;
+  /** Milliseconds to wait after first message arrives, letting bursts accumulate so a single batch prompt can drain several observations. */
   settlingWindowMs?: number;
 }
 
@@ -21,48 +23,47 @@ export class SessionQueueProcessor {
     private events: EventEmitter
   ) {}
 
-  /**
-   * Create an async iterator that yields messages as they become available.
-   * Uses atomic claim-confirm to prevent duplicates.
-   * Messages are claimed (marked processing) and stay in DB until confirmProcessed().
-   * Self-heals stale processing messages before each claim.
-   * Waits for 'message' event when queue is empty.
-   *
-   * CRITICAL: Calls onIdleTimeout callback after 3 minutes of inactivity.
-   * The callback should trigger abortController.abort() to kill the SDK subprocess.
-   * Just returning from the iterator is NOT enough - the subprocess stays alive!
-   */
   async *createIterator(options: CreateIteratorOptions): AsyncIterableIterator<PendingMessageWithId> {
-    const { sessionDbId, signal, onIdleTimeout, settlingWindowMs = DEFAULT_SETTLING_WINDOW_MS } = options;
+    const {
+      sessionDbId,
+      signal,
+      onIdleTimeout,
+      idleTimeoutMs = IDLE_TIMEOUT_MS,
+      claimRetryDelayMs = 250,
+      maxClaimFailures = 3,
+      settlingWindowMs = DEFAULT_SETTLING_WINDOW_MS
+    } = options;
     let lastActivityTime = Date.now();
+    let claimFailures = 0;
 
     while (!signal.aborted) {
-      // Claim phase: atomically claim next pending message (marks as 'processing')
-      // Self-heals any stale processing messages before claiming
       let persistentMessage: PersistentPendingMessage | null = null;
       try {
         persistentMessage = this.store.claimNextMessage(sessionDbId);
       } catch (error) {
         if (signal.aborted) return;
         const normalizedError = error instanceof Error ? error : new Error(String(error));
-        logger.error('QUEUE', 'Failed to claim next message', { sessionDbId }, normalizedError);
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        claimFailures++;
+        logger.error('QUEUE', 'Failed to claim next message', { sessionDbId, claimFailures, maxClaimFailures }, normalizedError);
+        if (claimFailures >= maxClaimFailures) {
+          logger.error('QUEUE', 'Claim failure limit reached; ending iterator', { sessionDbId, claimFailures }, normalizedError);
+          return;
+        }
+        await this.waitForDelay(signal, claimRetryDelayMs);
         continue;
       }
 
       if (persistentMessage) {
+        claimFailures = 0;
         lastActivityTime = Date.now();
         yield this.toPendingMessageWithId(persistentMessage);
         continue;
       }
 
-      // Wait phase: queue empty — wait for wake-up event or idle timeout
       try {
-        const idleTimedOut = await this.handleWaitPhase(signal, lastActivityTime, sessionDbId, onIdleTimeout);
+        const idleTimedOut = await this.handleWaitPhase(signal, lastActivityTime, sessionDbId, idleTimeoutMs, onIdleTimeout);
         if (idleTimedOut) return;
 
-        // Settling window: give a burst of rapid tool calls time to accumulate
-        // before claiming, so SDKAgent can drain several at once into one batch prompt
         if (settlingWindowMs > 0 && !signal.aborted) {
           logger.debug('QUEUE', `SETTLING | sessionDbId=${sessionDbId} | windowMs=${settlingWindowMs}`);
           await this.settleDelay(settlingWindowMs, signal);
@@ -72,8 +73,8 @@ export class SessionQueueProcessor {
       } catch (error) {
         if (signal.aborted) return;
         const normalizedError = error instanceof Error ? error : new Error(String(error));
-        logger.error('QUEUE', 'Error waiting for message', { sessionDbId }, normalizedError);
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        logger.error('QUEUE', 'Error waiting for message; ending iterator', { sessionDbId }, normalizedError);
+        return;
       }
     }
   }
@@ -95,25 +96,22 @@ export class SessionQueueProcessor {
     };
   }
 
-  /**
-   * Handle the wait phase: wait for a message or check idle timeout.
-   * @returns true if idle timeout was reached (caller should return/exit iterator)
-   */
   private async handleWaitPhase(
     signal: AbortSignal,
     lastActivityTime: number,
     sessionDbId: number,
+    idleTimeoutMs: number,
     onIdleTimeout?: () => void
   ): Promise<boolean> {
-    const receivedMessage = await this.waitForMessage(signal, IDLE_TIMEOUT_MS);
+    const receivedMessage = await this.waitForMessage(signal, idleTimeoutMs);
 
     if (!receivedMessage && !signal.aborted) {
       const idleDuration = Date.now() - lastActivityTime;
-      if (idleDuration >= IDLE_TIMEOUT_MS) {
+      if (idleDuration >= idleTimeoutMs) {
         logger.info('SESSION', 'Idle timeout reached, triggering abort to kill subprocess', {
           sessionDbId,
           idleDurationMs: idleDuration,
-          thresholdMs: IDLE_TIMEOUT_MS
+          thresholdMs: idleTimeoutMs
         });
         onIdleTimeout?.();
         return true;
@@ -122,29 +120,23 @@ export class SessionQueueProcessor {
     return false;
   }
 
-  /**
-   * Wait for a message event or timeout.
-   * @param signal - AbortSignal to cancel waiting
-   * @param timeoutMs - Maximum time to wait before returning
-   * @returns true if a message was received, false if timeout occurred
-   */
   private waitForMessage(signal: AbortSignal, timeoutMs: number = IDLE_TIMEOUT_MS): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
       const onMessage = () => {
         cleanup();
-        resolve(true); // Message received
+        resolve(true); 
       };
 
       const onAbort = () => {
         cleanup();
-        resolve(false); // Aborted, let loop check signal.aborted
+        resolve(false); 
       };
 
       const onTimeout = () => {
         cleanup();
-        resolve(false); // Timeout occurred
+        resolve(false); 
       };
 
       const cleanup = () => {
@@ -158,6 +150,27 @@ export class SessionQueueProcessor {
       this.events.once('message', onMessage);
       signal.addEventListener('abort', onAbort, { once: true });
       timeoutId = setTimeout(onTimeout, timeoutMs);
+    });
+  }
+
+  private waitForDelay(signal: AbortSignal, delayMs: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = () => {
+        if (timeoutId !== undefined) {
+          clearTimeout(timeoutId);
+        }
+        signal.removeEventListener('abort', onAbort);
+      };
+      const onAbort = () => {
+        cleanup();
+        resolve();
+      };
+      timeoutId = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, delayMs);
+      signal.addEventListener('abort', onAbort, { once: true });
     });
   }
 }

@@ -60,6 +60,7 @@ export class ProductionRanker implements SemanticRanker {
       })
       .slice(0, limit);
     logger.debug(
+      'SEARCH',
       `[ProductionRanker] ranked ${ranked.length}/${candidates.length} candidates at threshold ${threshold} (limit=${limit})`
     );
     return ranked;

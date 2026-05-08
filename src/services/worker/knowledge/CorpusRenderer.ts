@@ -1,19 +1,10 @@
-/**
- * CorpusRenderer - Renders observations into full-detail prompt text
- *
- * The 1M token context means we render EVERYTHING at full detail.
- * No truncation, no summarization - every observation gets its complete content.
- */
 
 import type { CorpusFile, CorpusObservation, CorpusFilter } from './types.js';
 import { logger } from '../../../utils/logger.js';
 
 export class CorpusRenderer {
-  /**
-   * Render all observations into a structured prompt string
-   */
   renderCorpus(corpus: CorpusFile): string {
-    logger.debug(`[CorpusRenderer] rendering corpus "${corpus.name}" with ${corpus.observations.length} observations`);
+    logger.debug('SEARCH', `[CorpusRenderer] rendering corpus "${corpus.name}" with ${corpus.observations.length} observations`);
     const sections: string[] = [];
 
     sections.push(`# Knowledge Corpus: ${corpus.name}`);
@@ -35,13 +26,9 @@ export class CorpusRenderer {
     return sections.join('\n');
   }
 
-  /**
-   * Render a single observation at full detail
-   */
   private renderObservation(observation: CorpusObservation): string {
     const lines: string[] = [];
 
-    // Header: type, title, date
     const dateStr = new Date(observation.created_at_epoch).toISOString().split('T')[0];
     lines.push(`## [${observation.type.toUpperCase()}] ${observation.title}`);
     lines.push(`*${dateStr}* | Project: ${observation.project}`);
@@ -52,13 +39,11 @@ export class CorpusRenderer {
 
     lines.push('');
 
-    // Full narrative text
     if (observation.narrative) {
       lines.push(observation.narrative);
       lines.push('');
     }
 
-    // All facts
     if (observation.facts.length > 0) {
       lines.push('**Facts:**');
       for (const fact of observation.facts) {
@@ -67,12 +52,10 @@ export class CorpusRenderer {
       lines.push('');
     }
 
-    // All concepts
     if (observation.concepts.length > 0) {
       lines.push(`**Concepts:** ${observation.concepts.join(', ')}`);
     }
 
-    // All files read/modified
     if (observation.files_read.length > 0) {
       lines.push(`**Files Read:** ${observation.files_read.join(', ')}`);
     }
@@ -86,18 +69,12 @@ export class CorpusRenderer {
     return lines.join('\n');
   }
 
-  /**
-   * Rough token estimate: characters / 4
-   */
   estimateTokens(text: string): number {
     return Math.ceil(text.length / 4);
   }
 
-  /**
-   * Auto-generate a system prompt based on filter params and corpus metadata
-   */
   generateSystemPrompt(corpus: CorpusFile): string {
-    logger.debug(`[CorpusRenderer] generating system prompt for corpus "${corpus.name}"`);
+    logger.debug('SEARCH', `[CorpusRenderer] generating system prompt for corpus "${corpus.name}"`);
     const filter = corpus.filter;
     const parts: string[] = [];
 

@@ -1,6 +1,5 @@
 import { describe, it, expect, mock, beforeEach } from 'bun:test';
 
-// Mock the ModeManager before imports
 mock.module('../../../src/services/domain/ModeManager.js', () => ({
   ModeManager: {
     getInstance: () => ({
@@ -44,7 +43,6 @@ mock.module('../../../src/services/domain/ModeManager.js', () => ({
 import { SearchOrchestrator } from '../../../src/services/worker/search/SearchOrchestrator.js';
 import type { ObservationSearchResult, SessionSummarySearchResult, UserPromptSearchResult } from '../../../src/services/worker/search/types.js';
 
-// Mock data
 const mockObservation: ObservationSearchResult = {
   id: 1,
   memory_session_id: 'session-123',
@@ -152,16 +150,16 @@ describe('SearchOrchestrator', () => {
         expect(mockChromaSync.queryChroma).toHaveBeenCalled();
       });
 
-      it('should fall back to SQLite when Chroma fails', async () => {
+      it('should throw ChromaUnavailableError (HTTP 503) when Chroma fails', async () => {
         mockChromaSync.queryChroma = mock(() => Promise.reject(new Error('Chroma unavailable')));
 
-        const result = await orchestrator.search({
-          query: 'test query'
+        await expect(
+          orchestrator.search({ query: 'test query' })
+        ).rejects.toMatchObject({
+          name: 'ChromaUnavailableError',
+          statusCode: 503,
+          code: 'CHROMA_UNAVAILABLE'
         });
-
-        // Chroma failed, should have fallen back
-        expect(result.fellBack).toBe(true);
-        expect(result.usedChroma).toBe(false);
       });
 
       it('should normalize comma-separated concepts', async () => {
@@ -170,7 +168,6 @@ describe('SearchOrchestrator', () => {
           limit: 10
         });
 
-        // Should be parsed into array internally
         const callArgs = mockSessionSearch.searchObservations.mock.calls[0];
         expect(callArgs[1].concepts).toEqual(['concept1', 'concept2', 'concept3']);
       });
@@ -203,7 +200,6 @@ describe('SearchOrchestrator', () => {
           type: 'observations'
         });
 
-        // Should search only observations
         expect(mockSessionSearch.searchObservations).toHaveBeenCalled();
         expect(mockSessionSearch.searchSessions).not.toHaveBeenCalled();
         expect(mockSessionSearch.searchUserPrompts).not.toHaveBeenCalled();
@@ -216,7 +212,6 @@ describe('SearchOrchestrator', () => {
           limit: 10
         });
 
-        // Hybrid strategy should be used
         expect(mockSessionSearch.findByConcept).toHaveBeenCalled();
         expect(mockChromaSync.queryChroma).toHaveBeenCalled();
       });
@@ -298,7 +293,8 @@ describe('SearchOrchestrator', () => {
 
         const formatted = orchestrator.formatSearchResults(results, 'test', true);
 
-        expect(formatted).toContain('Vector search failed');
+        expect(formatted).toContain('Semantic search');
+        expect(formatted).toContain('Falling back to keyword search');
       });
     });
   });
@@ -320,7 +316,6 @@ describe('SearchOrchestrator', () => {
           query: 'semantic query'
         });
 
-        // Without Chroma, FTS handles query searches (PATH 2e) — results come from FTS
         expect(result.strategy).toBe('fts');
         expect(result.usedChroma).toBe(false);
       });
@@ -394,8 +389,6 @@ describe('SearchOrchestrator', () => {
       });
 
       const callArgs = mockSessionSearch.searchObservations.mock.calls[0];
-      // Empty strings are falsy, so the normalization doesn't process them
-      // They stay as empty strings (the underlying search functions handle this)
       expect(callArgs[1].concepts).toEqual('');
       expect(callArgs[1].files).toEqual('');
     });

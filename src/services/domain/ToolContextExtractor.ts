@@ -105,7 +105,7 @@ export function extractToolMetadata(toolName: string, rawToolInput: unknown): To
       };
 
     default:
-      logger.warn('TOOL_CONTEXT', 'Unknown tool name; file metadata left empty', { toolName });
+      logger.warn('PARSER', 'Unknown tool name; file metadata left empty', { toolName });
       return {
         files_read: [],
         files_modified: [],

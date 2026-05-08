@@ -20,7 +20,7 @@ export function recordObservationFeedback(
   metadata?: Record<string, unknown>
 ): void {
   if (observationIds.length === 0) return;
-  logger.debug(`[observation-feedback] recording ${signalType} for ${observationIds.length} observations`);
+  logger.debug('DB', `[observation-feedback] recording ${signalType} for ${observationIds.length} observations`);
 
   const insertStmt = db.prepare(`
     INSERT INTO observation_feedback (
@@ -103,6 +103,6 @@ export function getObservationFeedbackStats(
     }
   }
 
-  logger.debug(`[observation-feedback] loaded feedback stats for ${windowDays}d window (${rows.length} rows)`);
+  logger.debug('DB', `[observation-feedback] loaded feedback stats for ${windowDays}d window (${rows.length} rows)`);
   return stats;
 }

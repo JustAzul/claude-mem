@@ -1,36 +1,31 @@
-/**
- * Summarize Handler - Stop
- *
- * Runs in the Stop hook (120s timeout, not capped like SessionEnd).
- * This is the ONLY place where we can reliably wait for async work.
- *
- * Flow:
- * 1. Queue summarize request to worker
- * 2. Poll worker until summary processing completes
- * 3. Call /api/sessions/complete to clean up session
- *
- * SessionEnd (1.5s cap from Claude Code) is just a lightweight fallback —
- * all real work must happen here in Stop.
- */
 
 import type { EventHandler, NormalizedHookInput, HookResult } from '../types.js';
-import { ensureWorkerRunning, workerHttpRequest } from '../../shared/worker-utils.js';
+import { executeWithWorkerFallback, isWorkerFallback, workerHttpRequest } from '../../shared/worker-utils.js';
 import { logger } from '../../utils/logger.js';
 import { extractLastMessage } from '../../shared/transcript-parser.js';
-import { HOOK_EXIT_CODES, HOOK_TIMEOUTS, getTimeout } from '../../shared/hook-constants.js';
+import { stripMemoryTagsFromPrompt } from '../../utils/tag-stripping.js';
+import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
+import { shouldTrackProject } from '../../shared/should-track-project.js';
 
-const SUMMARIZE_TIMEOUT_MS = getTimeout(HOOK_TIMEOUTS.DEFAULT);
-const POLL_INTERVAL_MS = 500;
-const MAX_WAIT_FOR_SUMMARY_MS = 110_000; // 110s — fits within Stop hook's 120s timeout
+// Stop hook has a 120s timeout; cap our wait short of that so we have headroom
+// to send the completion request after summary processing finishes.
+const MAX_WAIT_FOR_SUMMARY_MS = 110_000;
+const POLL_INTERVAL_MS = 1000;
 
 export const summarizeHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
-    // Skip summaries in subagent context — subagents do not own the session summary.
-    // Gate on agentId only: that field is present exclusively for Task-spawned subagents.
-    // agentType alone (no agentId) indicates `--agent`-started main sessions, which still
-    // own their summary. Do this BEFORE ensureWorkerRunning() so a subagent Stop hook
-    // does not bootstrap the worker.
+    if (input.cwd && !shouldTrackProject(input.cwd)) {
+      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+    }
+
+    if (input.stopHookActive === true) {
+      logger.debug('HOOK', 'Skipping summary: Codex Stop hook re-entry detected', {
+        sessionId: input.sessionId,
+      });
+      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+    }
+
     if (input.agentId) {
       logger.debug('HOOK', 'Skipping summary: subagent context detected', {
         sessionId: input.sessionId,
@@ -40,37 +35,34 @@ export const summarizeHandler: EventHandler = {
       return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
     }
 
-    // Ensure worker is running before any other logic
-    const workerReady = await ensureWorkerRunning();
-    if (!workerReady) {
-      // Worker not available - skip summary gracefully
-      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
-    }
-
     const { sessionId, transcriptPath } = input;
 
-    // Validate required fields before processing
-    if (!transcriptPath) {
-      // No transcript available - skip summary gracefully (not an error)
-      logger.debug('HOOK', `No transcriptPath in Stop hook input for session ${sessionId} - skipping summary`);
+    if (!sessionId) {
+      logger.warn('HOOK', 'summarize: No sessionId provided, skipping');
       return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
     }
 
-    // Extract last assistant message from transcript (the work Claude did)
-    // Note: "user" messages in transcripts are mostly tool_results, not actual user input.
-    // The user's original request is already stored in user_prompts table.
     let lastAssistantMessage = '';
-    try {
-      lastAssistantMessage = extractLastMessage(transcriptPath, 'assistant', true);
-    } catch (err) {
-      logger.warn('HOOK', `Stop hook: failed to extract last assistant message for session ${sessionId}: ${err instanceof Error ? err.message : err}`);
-      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+
+    if (input.lastAssistantMessage !== undefined) {
+      lastAssistantMessage = stripMemoryTagsFromPrompt(input.lastAssistantMessage);
+    } else {
+      if (!transcriptPath) {
+        logger.debug('HOOK', `No transcriptPath in Stop hook input for session ${sessionId} - skipping summary`);
+        return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+      }
+
+      try {
+        lastAssistantMessage = extractLastMessage(transcriptPath, 'assistant', true);
+        lastAssistantMessage = stripMemoryTagsFromPrompt(lastAssistantMessage);
+      } catch (err) {
+        logger.warn('HOOK', `Stop hook: failed to extract last assistant message for session ${sessionId}: ${err instanceof Error ? err.message : err}`);
+        return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+      }
     }
 
-    // Skip summary if transcript has no assistant message (prevents repeated
-    // empty summarize requests that pollute logs — upstream bug)
     if (!lastAssistantMessage || !lastAssistantMessage.trim()) {
-      logger.debug('HOOK', 'No assistant message in transcript - skipping summary', {
+      logger.debug('HOOK', 'No assistant message available - skipping summary', {
         sessionId,
         transcriptPath
       });
@@ -83,20 +75,17 @@ export const summarizeHandler: EventHandler = {
 
     const platformSource = normalizePlatformSource(input.platform);
 
-    // 1. Queue summarize request — worker returns immediately with { status: 'queued' }
-    const response = await workerHttpRequest('/api/sessions/summarize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const queueResult = await executeWithWorkerFallback<{ status?: string }>(
+      '/api/sessions/summarize',
+      'POST',
+      {
         contentSessionId: sessionId,
         last_assistant_message: lastAssistantMessage,
-        platformSource
-      }),
-      timeoutMs: SUMMARIZE_TIMEOUT_MS
-    });
-
-    if (!response.ok) {
-      return { continue: true, suppressOutput: true };
+        platformSource,
+      },
+    );
+    if (isWorkerFallback(queueResult)) {
+      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
     }
 
     logger.debug('HOOK', 'Summary request queued, waiting for completion');
@@ -170,5 +159,5 @@ export const summarizeHandler: EventHandler = {
     }
 
     return { continue: true, suppressOutput: true };
-  }
+  },
 };

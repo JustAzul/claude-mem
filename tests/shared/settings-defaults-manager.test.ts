@@ -1,15 +1,3 @@
-/**
- * SettingsDefaultsManager Tests
- *
- * Tests for the settings file auto-creation feature in loadFromFile().
- * Uses temp directories for file system isolation.
- *
- * Test cases:
- * 1. File doesn't exist - should create file with defaults and return defaults
- * 2. File exists with valid content - should return parsed content
- * 3. File exists but is empty/corrupt - should return defaults
- * 4. Directory doesn't exist - should create directory and file
- */
 
 import { describe, it, expect, beforeEach, afterEach, mock } from 'bun:test';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
@@ -60,7 +48,6 @@ describe('SettingsDefaultsManager', () => {
   });
 
   afterEach(() => {
-    // Clean up temp directory
     try {
       rmSync(tempDir, { recursive: true, force: true });
     } catch {
@@ -153,7 +140,6 @@ describe('SettingsDefaultsManager', () => {
       });
 
       it('should merge file settings with defaults for missing keys', () => {
-        // Only set one value, defaults should fill the rest
         const partialSettings = {
           CLAUDE_MEM_MODEL: 'partial-model',
         };
@@ -163,7 +149,6 @@ describe('SettingsDefaultsManager', () => {
         const defaults = SettingsDefaultsManager.getAllDefaults();
 
         expect(result.CLAUDE_MEM_MODEL).toBe('partial-model');
-        // Other values should come from defaults
         expect(result.CLAUDE_MEM_WORKER_PORT).toBe(defaults.CLAUDE_MEM_WORKER_PORT);
         expect(result.CLAUDE_MEM_WORKER_HOST).toBe(defaults.CLAUDE_MEM_WORKER_HOST);
         expect(result.CLAUDE_MEM_LOG_LEVEL).toBe(defaults.CLAUDE_MEM_LOG_LEVEL);
@@ -272,7 +257,6 @@ describe('SettingsDefaultsManager', () => {
 
         SettingsDefaultsManager.loadFromFile(settingsPath);
 
-        // File should now be flat schema
         const content = readFileSync(settingsPath, 'utf-8');
         const parsed = JSON.parse(content);
         expect(parsed.env).toBeUndefined();
@@ -308,12 +292,8 @@ describe('SettingsDefaultsManager', () => {
         const settings = { CLAUDE_MEM_MODEL: 'bom-model' };
         writeFileSync(settingsPath, bom + JSON.stringify(settings));
 
-        // JSON.parse handles BOM, but let's verify behavior
         const result = SettingsDefaultsManager.loadFromFile(settingsPath);
 
-        // If it fails to parse due to BOM, it should return defaults
-        // If it succeeds, it should return the parsed value
-        // Either way, should not throw
         expect(result).toBeDefined();
       });
     });
@@ -325,23 +305,20 @@ describe('SettingsDefaultsManager', () => {
       const defaults2 = SettingsDefaultsManager.getAllDefaults();
 
       expect(defaults1).toEqual(defaults2);
-      expect(defaults1).not.toBe(defaults2); // Different object references
+      expect(defaults1).not.toBe(defaults2); 
     });
 
     it('should include all expected keys', () => {
       const defaults = SettingsDefaultsManager.getAllDefaults();
 
-      // Core settings
       expect(defaults.CLAUDE_MEM_MODEL).toBeDefined();
       expect(defaults.CLAUDE_MEM_WORKER_PORT).toBeDefined();
       expect(defaults.CLAUDE_MEM_WORKER_HOST).toBeDefined();
 
-      // Provider settings
       expect(defaults.CLAUDE_MEM_PROVIDER).toBeDefined();
       expect(defaults.CLAUDE_MEM_GEMINI_API_KEY).toBeDefined();
       expect(defaults.CLAUDE_MEM_OPENROUTER_API_KEY).toBeDefined();
 
-      // System settings
       expect(defaults.CLAUDE_MEM_DATA_DIR).toBeDefined();
       expect(defaults.CLAUDE_MEM_LOG_LEVEL).toBeDefined();
     });
@@ -350,13 +327,15 @@ describe('SettingsDefaultsManager', () => {
   describe('get', () => {
     it('should return default value for key', () => {
       expect(SettingsDefaultsManager.get('CLAUDE_MEM_MODEL')).toBe('claude-sonnet-4-6');
-      expect(SettingsDefaultsManager.get('CLAUDE_MEM_WORKER_PORT')).toBe('37777');
+      const expectedPort = String(37700 + ((process.getuid?.() ?? 77) % 100));
+      expect(SettingsDefaultsManager.get('CLAUDE_MEM_WORKER_PORT')).toBe(expectedPort);
     });
   });
 
   describe('getInt', () => {
     it('should return integer value for numeric string', () => {
-      expect(SettingsDefaultsManager.getInt('CLAUDE_MEM_WORKER_PORT')).toBe(37777);
+      const expectedPort = 37700 + ((process.getuid?.() ?? 77) % 100);
+      expect(SettingsDefaultsManager.getInt('CLAUDE_MEM_WORKER_PORT')).toBe(expectedPort);
       expect(SettingsDefaultsManager.getInt('CLAUDE_MEM_CONTEXT_OBSERVATIONS')).toBe(50);
     });
   });
@@ -375,14 +354,12 @@ describe('SettingsDefaultsManager', () => {
     const originalEnv: Record<string, string | undefined> = {};
 
     beforeEach(() => {
-      // Save original env values
       originalEnv.CLAUDE_MEM_WORKER_PORT = process.env.CLAUDE_MEM_WORKER_PORT;
       originalEnv.CLAUDE_MEM_MODEL = process.env.CLAUDE_MEM_MODEL;
       originalEnv.CLAUDE_MEM_LOG_LEVEL = process.env.CLAUDE_MEM_LOG_LEVEL;
     });
 
     afterEach(() => {
-      // Restore original env values
       if (originalEnv.CLAUDE_MEM_WORKER_PORT === undefined) {
         delete process.env.CLAUDE_MEM_WORKER_PORT;
       } else {
@@ -401,7 +378,6 @@ describe('SettingsDefaultsManager', () => {
     });
 
     it('should prioritize env var over file setting', () => {
-      // File has port 12345, env var has 54321
       const fileSettings = {
         CLAUDE_MEM_WORKER_PORT: '12345',
       };
@@ -414,7 +390,6 @@ describe('SettingsDefaultsManager', () => {
     });
 
     it('should prioritize env var over default', () => {
-      // No file, env var set
       process.env.CLAUDE_MEM_WORKER_PORT = '99999';
 
       const result = SettingsDefaultsManager.loadFromFile(settingsPath);
@@ -453,35 +428,29 @@ describe('SettingsDefaultsManager', () => {
 
       process.env.CLAUDE_MEM_WORKER_PORT = '54321';
       process.env.CLAUDE_MEM_MODEL = 'env-model';
-      // LOG_LEVEL not set in env, should use file value
 
       const result = SettingsDefaultsManager.loadFromFile(settingsPath);
 
       expect(result.CLAUDE_MEM_WORKER_PORT).toBe('54321');
       expect(result.CLAUDE_MEM_MODEL).toBe('env-model');
-      expect(result.CLAUDE_MEM_LOG_LEVEL).toBe('DEBUG'); // From file
+      expect(result.CLAUDE_MEM_LOG_LEVEL).toBe('DEBUG'); 
     });
 
     it('should document priority: env > file > defaults', () => {
-      // This test documents the expected priority order
       const defaults = SettingsDefaultsManager.getAllDefaults();
 
-      // Set file to something different from default
       const fileSettings = {
         CLAUDE_MEM_WORKER_PORT: '22222', // Different from default 37777
       };
       writeFileSync(settingsPath, JSON.stringify(fileSettings));
 
-      // Set env to something different from both
       process.env.CLAUDE_MEM_WORKER_PORT = '33333';
 
       const result = SettingsDefaultsManager.loadFromFile(settingsPath);
 
-      // Priority check:
-      // Default is 37777, file is 22222, env is 33333
-      // Result should be env (33333) because env > file > default
-      expect(defaults.CLAUDE_MEM_WORKER_PORT).toBe('37777'); // Confirm default
-      expect(result.CLAUDE_MEM_WORKER_PORT).toBe('33333'); // Env wins
+      const expectedDefault = String(37700 + ((process.getuid?.() ?? 77) % 100));
+      expect(defaults.CLAUDE_MEM_WORKER_PORT).toBe(expectedDefault); 
+      expect(result.CLAUDE_MEM_WORKER_PORT).toBe('33333'); 
     });
   });
 });

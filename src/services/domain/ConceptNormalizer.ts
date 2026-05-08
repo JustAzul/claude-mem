@@ -43,7 +43,7 @@ export function normalizeConcepts(concepts: string[], mode: ModeConfig): string[
     const canonical = allowedById.get(slug);
 
     if (canonical === undefined) {
-      logger.debug('CONCEPT_NORMALIZER', 'Dropping invalid concept', { value: slug });
+      logger.debug('PARSER', 'Dropping invalid concept', { value: slug });
       continue;
     }
 

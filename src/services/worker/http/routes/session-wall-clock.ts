@@ -41,6 +41,7 @@ export function evaluateSessionWallClockGuard(
 
   if (evaluation.shouldAbort) {
     logger.debug(
+      'SESSION',
       `[session-wall-clock] aborting stale session: idleAgeMs=${evaluation.idleAgeMs} limitMs=${input.maxSessionWallClockMs}`
     );
   }
