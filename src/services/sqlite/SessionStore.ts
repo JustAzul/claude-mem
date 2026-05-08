@@ -265,7 +265,8 @@ export class SessionStore {
   }
 
   private dropWorkerPidColumn(): void {
-    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(36) as SchemaVersion | undefined;
+    // Renumbered V32 → V39 to avoid collision with HEAD's V32.
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(39) as SchemaVersion | undefined;
 
     const cols = this.db.query('PRAGMA table_info(pending_messages)').all() as TableColumnInfo[];
     const hasColumn = cols.some(c => c.name === 'worker_pid');
@@ -283,12 +284,13 @@ export class SessionStore {
     }
 
     if (!applied) {
-      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(36, new Date().toISOString());
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(39, new Date().toISOString());
     }
   }
 
   private dropDeadPendingMessagesColumns(): void {
-    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(35) as SchemaVersion | undefined;
+    // Renumbered V31 → V38 to avoid collision with HEAD's V31 (context_origin).
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(38) as SchemaVersion | undefined;
 
     const cols = this.db.query('PRAGMA table_info(pending_messages)').all() as TableColumnInfo[];
     const colNames = new Set(cols.map(c => c.name));
@@ -305,7 +307,7 @@ export class SessionStore {
           logger.debug('DB', `Dropped dead column ${colName} from pending_messages`);
         }
         if (!applied) {
-          this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(35, new Date().toISOString());
+          this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(38, new Date().toISOString());
         }
         this.db.run('COMMIT');
       } catch (error) {
@@ -317,7 +319,7 @@ export class SessionStore {
     }
 
     if (!applied) {
-      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(35, new Date().toISOString());
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(38, new Date().toISOString());
     }
   }
 
@@ -1545,14 +1547,15 @@ export class SessionStore {
   }
 
   private addObservationsUniqueContentHashIndex(): void {
-    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(29) as SchemaVersion | undefined;
+    // Renumbered V29 → V36 to avoid collision with HEAD's V29 (Decision DNA).
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(36) as SchemaVersion | undefined;
     if (applied) return;
 
     const obsCols = this.db.query('PRAGMA table_info(observations)').all() as TableColumnInfo[];
     const hasMem = obsCols.some(c => c.name === 'memory_session_id');
     const hasHash = obsCols.some(c => c.name === 'content_hash');
     if (!hasMem || !hasHash) {
-      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(29, new Date().toISOString());
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(36, new Date().toISOString());
       return;
     }
 
@@ -1569,7 +1572,7 @@ export class SessionStore {
         CREATE UNIQUE INDEX IF NOT EXISTS ux_observations_session_hash
         ON observations(memory_session_id, content_hash)
       `);
-      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(29, new Date().toISOString());
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(36, new Date().toISOString());
       this.db.run('COMMIT');
     } catch (error) {
       this.db.run('ROLLBACK');
@@ -1578,6 +1581,7 @@ export class SessionStore {
   }
 
   private addObservationsMetadataColumn(): void {
+    // Renumbered V30 → V37 to avoid collision with HEAD's V30 (capture_snapshots).
     const cols = this.db.query('PRAGMA table_info(observations)').all() as TableColumnInfo[];
     const hasColumn = cols.some(c => c.name === 'metadata');
 
@@ -1586,7 +1590,7 @@ export class SessionStore {
       logger.debug('DB', 'Added metadata column to observations table (#2116)');
     }
 
-    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(30, new Date().toISOString());
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(37, new Date().toISOString());
   }
 
   updateMemorySessionId(sessionDbId: number, memorySessionId: string | null): void {

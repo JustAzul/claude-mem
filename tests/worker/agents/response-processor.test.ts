@@ -120,6 +120,7 @@ describe('ResponseProcessor', () => {
       contentSessionId: 'content-session-123',
       memorySessionId: 'memory-session-456',
       project: 'test-project',
+      platformSource: 'claude-code',
       userPrompt: 'Test prompt',
       pendingMessages: [],
       abortController: new AbortController(),
@@ -132,6 +133,10 @@ describe('ResponseProcessor', () => {
       claimedMessageIds: [],
       conversationHistory: [],
       currentProvider: 'claude',
+      consecutiveRestarts: 0,
+      lastGeneratorActivity: Date.now(),
+      processingMessageIds: [],
+      consecutiveSummaryFailures: 0,
       ...overrides,
     } as ActiveSession;
   }

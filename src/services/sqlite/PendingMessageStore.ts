@@ -67,9 +67,9 @@ export class PendingMessageStore {
         session_db_id, content_session_id, message_type,
         tool_name, tool_input, tool_response, cwd,
         last_assistant_message,
-        prompt_number, status, retry_count, created_at_epoch,
+        prompt_number, status, created_at_epoch,
         agent_type, agent_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
     `);
 
     const result = stmt.run(

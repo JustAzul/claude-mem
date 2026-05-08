@@ -149,6 +149,7 @@ describe('ResponseProcessor — deterministic metadata override', () => {
       getPendingMessageStore: () => ({
         confirmProcessed: mock(() => {}),
       }),
+      confirmClaimedMessages: mock(() => Promise.resolve(0)),
     } as unknown as SessionManager;
 
     mockWorker = {
@@ -321,9 +322,9 @@ describe('ResponseProcessor — deterministic metadata override', () => {
     expect(observations[0].files_modified).toEqual([]);
     expect(observations[0].type).toBe('discovery');
     expect(logger.warn).toHaveBeenCalledWith(
-      'TOOL_CONTEXT',
+      'PARSER',
       'Unknown tool name; file metadata left empty',
-      expect.objectContaining({ toolName: 'UnknownTool' })
+      { toolName: 'UnknownTool' }
     );
   });
 

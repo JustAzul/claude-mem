@@ -71,8 +71,13 @@ const baseInput = {
 };
 
 function postedBody(): any {
-  expect(workerCallLog).toHaveLength(1);
-  const { body } = workerCallLog[0];
+  // After the merge, summarize fires multiple HTTP calls (summarize POST + status
+  // poll + compute-signals + session-complete). Find the summarize POST specifically.
+  const call = workerCallLog.find((c) => c.path.includes('/summarize') || c.path.includes('summarize'));
+  if (!call) {
+    throw new Error(`No summarize call found in workerCallLog: ${JSON.stringify(workerCallLog.map((c) => c.path))}`);
+  }
+  const { body } = call;
   return typeof body === 'string' ? JSON.parse(body) : body;
 }
 

@@ -14,9 +14,8 @@ import { parseAgentXml } from '../../src/sdk/parser.js';
 
 function expectObservation(raw: string) {
   const result = parseAgentXml(raw);
-  if (!result.valid) throw new Error(`expected valid observation, got reason: ${result.reason}`);
-  if (result.kind !== 'observation') throw new Error(`expected observation, got ${result.kind}`);
-  return result.data;
+  if (!result.valid) throw new Error('expected valid observation, got invalid');
+  return result.observations;
 }
 
 describe('parseAgentXml — observations', () => {
@@ -148,9 +147,6 @@ describe('parseAgentXml — observations', () => {
   it('returns a fail-fast result when no observation/summary blocks are present', () => {
     const result = parseAgentXml('Some text without any observations.');
     expect(result.valid).toBe(false);
-    if (!result.valid) {
-      expect(result.reason).toMatch(/unknown root|empty/);
-    }
   });
 
   it('parses files_read and files_modified arrays correctly', () => {
@@ -177,7 +173,7 @@ describe('parseAgentXml — observations', () => {
       <why>Lock ordering was reversed because the prior order deadlocked under concurrent writes.</why>
     </observation>`;
 
-    const result = parseObservations(xml);
+    const result = expectObservation(xml);
 
     expect(result).toHaveLength(1);
     expect(result[0].why).toBe('Lock ordering was reversed because the prior order deadlocked under concurrent writes.');
@@ -190,7 +186,7 @@ describe('parseAgentXml — observations', () => {
       <narrative>OAuth2 with PKCE flow was implemented.</narrative>
     </observation>`;
 
-    const result = parseObservations(xml);
+    const result = expectObservation(xml);
 
     expect(result).toHaveLength(1);
     expect(result[0].why).toBeNull();
@@ -204,7 +200,7 @@ describe('parseAgentXml — observations', () => {
       <alternatives_rejected>Considered Redis but rejected due to ops overhead; considered Postgres but rejected as overkill.</alternatives_rejected>
     </observation>`;
 
-    const result = parseObservations(xml);
+    const result = expectObservation(xml);
 
     expect(result).toHaveLength(1);
     expect(result[0].alternatives_rejected).toBe('Considered Redis but rejected due to ops overhead; considered Postgres but rejected as overkill.');
@@ -217,7 +213,7 @@ describe('parseAgentXml — observations', () => {
       <narrative>Added null guard.</narrative>
     </observation>`;
 
-    const result = parseObservations(xml);
+    const result = expectObservation(xml);
 
     expect(result).toHaveLength(1);
     expect(result[0].alternatives_rejected).toBeNull();
@@ -231,7 +227,7 @@ describe('parseAgentXml — observations', () => {
       <related><id>9783</id><id>9784</id></related>
     </observation>`;
 
-    const result = parseObservations(xml);
+    const result = expectObservation(xml);
 
     expect(result).toHaveLength(1);
     expect(result[0].related_observation_ids).toEqual([9783, 9784]);
@@ -244,7 +240,7 @@ describe('parseAgentXml — observations', () => {
       <narrative>Standalone finding.</narrative>
     </observation>`;
 
-    const result = parseObservations(xml);
+    const result = expectObservation(xml);
 
     expect(result).toHaveLength(1);
     expect(result[0].related_observation_ids).toEqual([]);
@@ -258,7 +254,7 @@ describe('parseAgentXml — observations', () => {
       <related><id>abc</id><id>42</id><id>3.14</id><id>99</id></related>
     </observation>`;
 
-    const result = parseObservations(xml);
+    const result = expectObservation(xml);
 
     expect(result).toHaveLength(1);
     // Order matches XML: <id>abc</id><id>42</id><id>3.14</id><id>99</id>
@@ -275,10 +271,9 @@ describe('parseAgentXml — observations', () => {
       <why>Some rationale here.</why>
     </observation>`;
 
-    const result = parseObservations(xml);
-
-    // why alone does not count as sufficient content — ghost guard unchanged
-    expect(result).toHaveLength(0);
+    // why alone does not count as sufficient content — ghost guard returns valid: false.
+    const result = parseAgentXml(xml);
+    expect(result.valid).toBe(false);
   });
 });
 

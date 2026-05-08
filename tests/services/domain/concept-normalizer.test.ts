@@ -99,9 +99,9 @@ describe('normalizeConcepts', () => {
   it('dropped invalid concepts are logged at debug level', () => {
     normalizeConcepts(['how-it-works', 'not-a-concept'], CODE_MODE);
     expect(logger.debug).toHaveBeenCalledWith(
-      'CONCEPT_NORMALIZER',
+      'PARSER',
       'Dropping invalid concept',
-      expect.objectContaining({ value: 'not-a-concept' })
+      { value: 'not-a-concept' }
     );
   });
 
