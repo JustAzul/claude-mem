@@ -90,7 +90,6 @@ describe('ResponseProcessor', () => {
         markProcessed: mock(() => {}),
         confirmProcessed: mock(() => {}),  // CLAIM-CONFIRM pattern: confirm after successful storage
         cleanupProcessed: mock(() => 0),
-        resetStuckMessages: mock(() => 0),
       }),
       confirmClaimedMessages: mock(() => Promise.resolve(0)),
       resetProcessingToPending: mock(() => Promise.resolve(0)),

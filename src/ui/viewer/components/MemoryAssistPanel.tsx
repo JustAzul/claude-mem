@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import type { MemoryAssistEvent } from '../../../shared/memory-assist';
+import type { MemoryAssistEvent, MemoryAssistSourceStats } from '../../../shared/memory-assist';
 import type { Stats } from '../types';
 import { MemoryAssistOverview } from './memory-assist/MemoryAssistOverview';
 import { MemoryAssistCalibrationView } from './memory-assist/MemoryAssistCalibrationView';
@@ -172,9 +172,16 @@ export function MemoryAssistPanel({
         helpRate: feedbackStats.helpRate,
       }
     : recentOverallStats;
-  const promptStats = feedbackStats?.sourceStats?.semantic_prompt ?? recentPromptStats;
-  const summaryStats = feedbackStats?.sourceStats?.semantic_summary ?? recentSummaryStats;
-  const fileStats = feedbackStats?.sourceStats?.file_context ?? recentFileStats;
+  // The two source-stats shapes only diverge on `taxonomyCorrectionCount`
+  // (null vs undefined) and an extra `verdicts` field on the server shape.
+  // Normalize to SourceAssistStats so the consumer doesn't need a type guard.
+  const toSourceAssistStats = (s: MemoryAssistSourceStats | SourceAssistStats): SourceAssistStats => ({
+    ...(s as SourceAssistStats),
+    taxonomyCorrectionCount: s.taxonomyCorrectionCount ?? undefined,
+  });
+  const promptStats = toSourceAssistStats(feedbackStats?.sourceStats?.semantic_prompt ?? recentPromptStats);
+  const summaryStats = toSourceAssistStats(feedbackStats?.sourceStats?.semantic_summary ?? recentSummaryStats);
+  const fileStats = toSourceAssistStats(feedbackStats?.sourceStats?.file_context ?? recentFileStats);
 
   const selectedTraceEvent = useMemo(() => {
     if (!selectedTraceKey) return null;
@@ -544,9 +551,9 @@ export function MemoryAssistPanel({
         safeThreshold={safeThreshold}
         windowDays={windowDays}
         overallStats={overallStats}
-        promptStats={promptStats as SourceAssistStats}
-        summaryStats={summaryStats as SourceAssistStats}
-        fileStats={fileStats as SourceAssistStats}
+        promptStats={promptStats}
+        summaryStats={summaryStats}
+        fileStats={fileStats}
         feedbackStats={feedbackStats}
         tokenEconomics={stats.tokenEconomics ?? null}
         howToReadDismissed={howToReadDismissed}

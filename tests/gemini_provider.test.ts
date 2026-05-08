@@ -37,7 +37,6 @@ describe('GeminiProvider', () => {
   let mockSyncSummary: any;
   let mockMarkProcessed: any;
   let mockCleanupProcessed: any;
-  let mockResetStuckMessages: any;
   let mockDbManager: DatabaseManager;
   let mockSessionManager: SessionManager;
 
@@ -72,7 +71,6 @@ describe('GeminiProvider', () => {
     mockSyncSummary = mock(() => Promise.resolve());
     mockMarkProcessed = mock(() => {});
     mockCleanupProcessed = mock(() => 0);
-    mockResetStuckMessages = mock(() => 0);
 
     mockStoreObservations = mock(() => ({
       observationIds: [1],
@@ -107,7 +105,6 @@ describe('GeminiProvider', () => {
       markProcessed: mockMarkProcessed,
       confirmProcessed: mock(() => {}),  // CLAIM-CONFIRM pattern: confirm after successful storage
       cleanupProcessed: mockCleanupProcessed,
-      resetStuckMessages: mockResetStuckMessages
     };
 
     mockSessionManager = {

@@ -281,32 +281,6 @@ export class PendingMessageStore {
   }
 
   // ---------------------------------------------------------------------------
-  // Stub methods — callers exist but started_processing_at_epoch is gone.
-  // These are intentional no-ops; the self-healing timer pattern is dropped.
-  // TODO: remove call sites once callers are updated.
-  // ---------------------------------------------------------------------------
-
-  /** @deprecated started_processing_at_epoch dropped; always returns 0. */
-  resetStaleProcessingMessages(_thresholdMs: number = 5 * 60 * 1000, _sessionDbId?: number): number {
-    return 0;
-  }
-
-  /** @deprecated started_processing_at_epoch dropped; always returns 0. */
-  resetStuckMessages(_thresholdMs: number): number {
-    return 0;
-  }
-
-  /** @deprecated started_processing_at_epoch dropped; always returns 0. */
-  getStuckCount(_thresholdMs: number): number {
-    return 0;
-  }
-
-  /** @deprecated started_processing_at_epoch dropped; always returns 0. */
-  retryAllStuck(_thresholdMs: number): number {
-    return 0;
-  }
-
-  // ---------------------------------------------------------------------------
   // Counts / Queries
   // ---------------------------------------------------------------------------
 
