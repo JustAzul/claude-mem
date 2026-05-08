@@ -2,142 +2,144 @@ import { Database } from 'bun:sqlite';
 import type { PendingMessage } from '../worker-types.js';
 import { logger } from '../../utils/logger.js';
 
-/** Messages processing longer than this are considered stale and reset to pending by self-healing */
-const STALE_PROCESSING_THRESHOLD_MS = 60_000;
-
 /**
- * Persistent pending message record from database
+ * Persistent pending message record from database.
+ *
+ * Matches the final upstream schema (rebuildPendingMessagesForFinalQueueSchema):
+ * - Dropped: retry_count, started_processing_at_epoch, failed_at_epoch, completed_at_epoch
+ * - Added: tool_use_id, last_user_message
+ * - Status: 'pending' | 'processing' only (processed rows are deleted; failures re-queue)
  */
 export interface PersistentPendingMessage {
   id: number;
   session_db_id: number;
   content_session_id: string;
+  tool_use_id: string | null;
   message_type: 'observation' | 'summarize';
   tool_name: string | null;
   tool_input: string | null;
   tool_response: string | null;
   cwd: string | null;
+  last_user_message: string | null;
   last_assistant_message: string | null;
   prompt_number: number | null;
-  status: 'pending' | 'processing' | 'processed' | 'failed';
-  retry_count: number;
+  status: 'pending' | 'processing';
   created_at_epoch: number;
-  started_processing_at_epoch: number | null;
-  completed_at_epoch: number | null;
-  // Claude Code subagent identity — NULL for main-session messages.
   agent_type: string | null;
   agent_id: string | null;
 }
 
 /**
- * PendingMessageStore - Persistent work queue for SDK messages
- *
- * Messages are persisted before processing using a claim-confirm pattern.
- * This simplifies the lifecycle and eliminates duplicate processing bugs.
+ * PendingMessageStore - Persistent work queue for SDK messages.
  *
  * Lifecycle:
- * 1. enqueue() - Message persisted with status 'pending'
- * 2. claimNextMessage() - Atomically claims next pending message (marks as 'processing')
- * 3. confirmProcessed() - Deletes message after successful processing
- *
- * Self-healing:
- * - claimNextMessage() resets stale 'processing' messages (>60s) back to 'pending' before claiming
- * - This eliminates stuck messages from generator crashes without external timers
+ * 1. enqueue()           — Persist with status 'pending'; returns 0 on tool_use_id duplicate.
+ * 2. claimNextMessage()  — Atomically claims next pending message (pending → processing).
+ * 3. confirmProcessed()  — Deletes message after successful processing.
  *
  * Recovery:
- * - getSessionsWithPendingMessages() - Find sessions that need recovery on startup
+ * - markFailed()                    — Resets a processing row back to 'pending'.
+ * - markSessionMessagesFailed()     — Deletes processing rows for a session.
+ * - markAllSessionMessagesAbandoned()— Deletes all rows for a session.
+ * - resetProcessingToPending()      — Resets processing → pending for graceful handoff.
+ * - getSessionsWithPendingMessages()— Finds sessions needing recovery on startup.
  */
 export class PendingMessageStore {
   private db: Database;
-  private maxRetries: number;
+  /** Optional callback invoked after a successful enqueue (used by SqliteObservationQueueEngine). */
+  private onEnqueue: (() => void) | undefined;
 
-  constructor(db: Database, maxRetries: number = 3) {
+  constructor(db: Database, onEnqueue?: () => void) {
     this.db = db;
-    this.maxRetries = maxRetries;
+    this.onEnqueue = onEnqueue;
   }
 
+  // ---------------------------------------------------------------------------
+  // Enqueue
+  // ---------------------------------------------------------------------------
+
   /**
-   * Enqueue a new message (persist before processing)
-   * @returns The database ID of the persisted message
+   * Persist a message with status 'pending'.
+   * @returns The new row's id (>0), or 0 when tool_use_id dedup rejects the insert.
    */
   enqueue(sessionDbId: number, contentSessionId: string, message: PendingMessage): number {
     const now = Date.now();
-    const stmt = this.db.prepare(`
-      INSERT INTO pending_messages (
-        session_db_id, content_session_id, message_type,
-        tool_name, tool_input, tool_response, cwd,
-        last_assistant_message,
-        prompt_number, status, created_at_epoch,
-        agent_type, agent_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
-    `);
 
-    const result = stmt.run(
-      sessionDbId,
-      contentSessionId,
-      message.type,
-      message.tool_name || null,
-      message.tool_input ? JSON.stringify(message.tool_input) : null,
-      message.tool_response ? JSON.stringify(message.tool_response) : null,
-      message.cwd || null,
-      message.last_assistant_message || null,
-      message.prompt_number || null,
-      now,
-      message.agentType ?? null,
-      message.agentId ?? null
-    );
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO pending_messages (
+          session_db_id, content_session_id, tool_use_id, message_type,
+          tool_name, tool_input, tool_response, cwd,
+          last_user_message, last_assistant_message,
+          prompt_number, status, created_at_epoch,
+          agent_type, agent_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+      `);
 
-    return result.lastInsertRowid as number;
+      const result = stmt.run(
+        sessionDbId,
+        contentSessionId,
+        message.toolUseId ?? null,
+        message.type,
+        message.tool_name ?? null,
+        message.tool_input ? JSON.stringify(message.tool_input) : null,
+        message.tool_response ? JSON.stringify(message.tool_response) : null,
+        message.cwd ?? null,
+        null, // last_user_message — not in PendingMessage type; populated by upstream at enqueue time
+        message.last_assistant_message ?? null,
+        message.prompt_number ?? null,
+        now,
+        message.agentType ?? null,
+        message.agentId ?? null
+      );
+
+      const id = result.lastInsertRowid as number;
+      this.onEnqueue?.();
+      return id;
+    } catch (err: unknown) {
+      // Unique index ux_pending_session_tool fires when tool_use_id is non-null and duplicate.
+      if (
+        err instanceof Error &&
+        err.message.includes('UNIQUE constraint failed')
+      ) {
+        logger.debug('QUEUE', `DEDUP | contentSessionId=${contentSessionId} | toolUseId=${message.toolUseId}`);
+        return 0;
+      }
+      throw err;
+    }
   }
 
+  // ---------------------------------------------------------------------------
+  // Claim
+  // ---------------------------------------------------------------------------
+
   /**
-   * Atomically claim the next pending message by marking it as 'processing'.
-   * Self-healing: resets any stale 'processing' messages (>60s) back to 'pending' first.
-   * Message stays in DB until confirmProcessed() is called.
-   * Uses a transaction to prevent race conditions.
+   * Atomically claim the next pending message (pending → processing).
+   * No self-healing via timestamps — the schema no longer has started_processing_at_epoch.
    */
   claimNextMessage(sessionDbId: number): PersistentPendingMessage | null {
     const claimTx = this.db.transaction((sessionId: number) => {
-      // Capture time inside transaction so it's fresh if WAL contention causes retry
-      const now = Date.now();
-      // Self-healing: reset stale 'processing' messages back to 'pending'
-      // This recovers from generator crashes without external timers
-      // Note: strict < means messages must be OLDER than threshold to be reset
-      const staleCutoff = now - STALE_PROCESSING_THRESHOLD_MS;
-      const resetStmt = this.db.prepare(`
-        UPDATE pending_messages
-        SET status = 'pending', started_processing_at_epoch = NULL
-        WHERE session_db_id = ? AND status = 'processing'
-          AND started_processing_at_epoch < ?
-      `);
-      const resetResult = resetStmt.run(sessionId, staleCutoff);
-      if (resetResult.changes > 0) {
-        logger.info('QUEUE', `SELF_HEAL | sessionDbId=${sessionId} | recovered ${resetResult.changes} stale processing message(s)`);
-      }
-
       const peekStmt = this.db.prepare(`
         SELECT * FROM pending_messages
         WHERE session_db_id = ? AND status = 'pending'
         ORDER BY id ASC
         LIMIT 1
       `);
-      const msg = peekStmt.get(sessionId) as PersistentPendingMessage | null;
+      let msg = peekStmt.get(sessionId) as PersistentPendingMessage | null;
 
       if (msg) {
-        // CRITICAL FIX: Mark as 'processing' instead of deleting
-        // Message will be deleted by confirmProcessed() after successful store
-        const updateStmt = this.db.prepare(`
-          UPDATE pending_messages
-          SET status = 'processing', started_processing_at_epoch = ?
-          WHERE id = ?
-        `);
-        updateStmt.run(now, msg.id);
+        this.db.prepare(`
+          UPDATE pending_messages SET status = 'processing' WHERE id = ?
+        `).run(msg.id);
 
-        // Log claim with minimal info (avoid logging full payload)
         logger.info('QUEUE', `CLAIMED | sessionDbId=${sessionId} | messageId=${msg.id} | type=${msg.message_type}`, {
-          sessionId: sessionId
+          sessionId
         });
+
+        // Return row with updated status so callers see 'processing' immediately.
+        msg = { ...msg, status: 'processing' };
       }
+
       return msg;
     });
 
@@ -145,7 +147,7 @@ export class PendingMessageStore {
   }
 
   /**
-   * Claim a consecutive run of observation-type messages for batching.
+   * Claim a consecutive run of observation messages for batching.
    * Stops at the first non-observation or when maxItems is reached.
    * A non-observation that interrupts a partial batch is reset to pending.
    */
@@ -158,7 +160,7 @@ export class PendingMessageStore {
 
       if (msg.message_type !== 'observation') {
         this.db.prepare(
-          `UPDATE pending_messages SET status = 'pending', started_processing_at_epoch = NULL WHERE id = ?`
+          `UPDATE pending_messages SET status = 'pending' WHERE id = ?`
         ).run(msg.id);
         break;
       }
@@ -169,395 +171,252 @@ export class PendingMessageStore {
     return results;
   }
 
+  // ---------------------------------------------------------------------------
+  // Confirm / Delete
+  // ---------------------------------------------------------------------------
+
   /**
-   * Confirm a message was successfully processed - DELETE it from the queue.
-   * CRITICAL: Only call this AFTER the observation/summary has been stored to DB.
-   * This prevents message loss on generator crash.
+   * Confirm a message was successfully processed — DELETE it from the queue.
+   * Only call this AFTER the observation/summary has been stored to DB.
    */
   confirmProcessed(messageId: number): void {
-    const stmt = this.db.prepare('DELETE FROM pending_messages WHERE id = ?');
-    const result = stmt.run(messageId);
+    const result = this.db.prepare('DELETE FROM pending_messages WHERE id = ?').run(messageId);
     if (result.changes > 0) {
       logger.debug('QUEUE', `CONFIRMED | messageId=${messageId} | deleted from queue`);
     }
   }
 
   /**
-   * Reset stale 'processing' messages back to 'pending' for retry.
-   * Called on worker startup and periodically to recover from crashes.
-   * @param thresholdMs Messages processing longer than this are considered stale (default: 5 minutes)
-   * @returns Number of messages reset
-   */
-  resetStaleProcessingMessages(thresholdMs: number = 5 * 60 * 1000, sessionDbId?: number): number {
-    const cutoff = Date.now() - thresholdMs;
-    let stmt;
-    let result;
-    if (sessionDbId !== undefined) {
-      stmt = this.db.prepare(`
-        UPDATE pending_messages
-        SET status = 'pending', started_processing_at_epoch = NULL
-        WHERE status = 'processing' AND started_processing_at_epoch < ? AND session_db_id = ?
-      `);
-      result = stmt.run(cutoff, sessionDbId);
-    } else {
-      stmt = this.db.prepare(`
-        UPDATE pending_messages
-        SET status = 'pending', started_processing_at_epoch = NULL
-        WHERE status = 'processing' AND started_processing_at_epoch < ?
-      `);
-      result = stmt.run(cutoff);
-    }
-    if (result.changes > 0) {
-      logger.info('QUEUE', `RESET_STALE | count=${result.changes} | thresholdMs=${thresholdMs}${sessionDbId !== undefined ? ` | sessionDbId=${sessionDbId}` : ''}`);
-    }
-    return result.changes;
-  }
-
-  /**
-   * Get all pending messages for session (ordered by creation time)
-   */
-  getAllPending(sessionDbId: number): PersistentPendingMessage[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM pending_messages
-      WHERE session_db_id = ? AND status = 'pending'
-      ORDER BY id ASC
-    `);
-    return stmt.all(sessionDbId) as PersistentPendingMessage[];
-  }
-
-  /**
-   * Get all queue messages (for UI display)
-   * Returns pending, processing, and failed messages (not processed - they're deleted)
-   * Joins with sdk_sessions to get project name
-   */
-  getQueueMessages(): (PersistentPendingMessage & { project: string | null })[] {
-    const stmt = this.db.prepare(`
-      SELECT pm.*, ss.project
-      FROM pending_messages pm
-      LEFT JOIN sdk_sessions ss ON pm.content_session_id = ss.content_session_id
-      WHERE pm.status IN ('pending', 'processing', 'failed')
-      ORDER BY
-        CASE pm.status
-          WHEN 'failed' THEN 0
-          WHEN 'processing' THEN 1
-          WHEN 'pending' THEN 2
-        END,
-        pm.created_at_epoch ASC
-    `);
-    return stmt.all() as (PersistentPendingMessage & { project: string | null })[];
-  }
-
-  /**
-   * Get count of stuck messages (processing longer than threshold)
-   */
-  getStuckCount(thresholdMs: number): number {
-    const cutoff = Date.now() - thresholdMs;
-    const stmt = this.db.prepare(`
-      SELECT COUNT(*) as count FROM pending_messages
-      WHERE status = 'processing' AND started_processing_at_epoch < ?
-    `);
-    const result = stmt.get(cutoff) as { count: number };
-    return result.count;
-  }
-
-  /**
-   * Retry a specific message (reset to pending)
-   * Works for pending (re-queue), processing (reset stuck), and failed messages
-   */
-  retryMessage(messageId: number): boolean {
-    const stmt = this.db.prepare(`
-      UPDATE pending_messages
-      SET status = 'pending', started_processing_at_epoch = NULL
-      WHERE id = ? AND status IN ('pending', 'processing', 'failed')
-    `);
-    const result = stmt.run(messageId);
-    return result.changes > 0;
-  }
-
-  /**
-   * Reset all processing messages for a session to pending
-   * Used when force-restarting a stuck session
-   */
-  resetProcessingToPending(sessionDbId: number): number {
-    const stmt = this.db.prepare(`
-      UPDATE pending_messages
-      SET status = 'pending', started_processing_at_epoch = NULL
-      WHERE session_db_id = ? AND status = 'processing'
-    `);
-    const result = stmt.run(sessionDbId);
-    return result.changes;
-  }
-
-  /**
-   * Mark all processing messages for a session as failed
-   * Used in error recovery when session generator crashes
-   * @returns Number of messages marked failed
+   * Delete all processing messages for a session (replaces "mark failed").
+   * The 'failed' status was dropped; abandonment equals deletion.
+   * @returns Number of messages deleted
    */
   markSessionMessagesFailed(sessionDbId: number): number {
-    const now = Date.now();
-
-    // Atomic update - all processing messages for session → failed
-    // Note: This bypasses retry logic since generator failures are session-level,
-    // not message-level. Individual message failures use markFailed() instead.
-    const stmt = this.db.prepare(`
-      UPDATE pending_messages
-      SET status = 'failed', failed_at_epoch = ?
-      WHERE session_db_id = ? AND status = 'processing'
-    `);
-
-    const result = stmt.run(now, sessionDbId);
-    return result.changes;
+    return this.db.prepare(`
+      DELETE FROM pending_messages WHERE session_db_id = ? AND status = 'processing'
+    `).run(sessionDbId).changes;
   }
 
   /**
-   * Mark all pending and processing messages for a session as failed (abandoned).
-   * Used when SDK session is terminated and no fallback agent is available:
-   * prevents the session from appearing in getSessionsWithPendingMessages forever.
-   * @returns Number of messages marked failed
+   * Delete all pending and processing messages for a session.
+   * @returns Number of messages deleted
    */
   markAllSessionMessagesAbandoned(sessionDbId: number): number {
-    const now = Date.now();
-    const stmt = this.db.prepare(`
-      UPDATE pending_messages
-      SET status = 'failed', failed_at_epoch = ?
-      WHERE session_db_id = ? AND status IN ('pending', 'processing')
-    `);
-    const result = stmt.run(now, sessionDbId);
-    return result.changes;
+    return this.db.prepare(`
+      DELETE FROM pending_messages WHERE session_db_id = ? AND status IN ('pending', 'processing')
+    `).run(sessionDbId).changes;
   }
 
   /**
-   * Reset in-flight messages for graceful handoff to a new generator.
-   *
-   * Used on generator completion when the Claude Code parent session may
-   * still be active (e.g. worker restart, generator crash mid-flight).
-   * Unlike markAllSessionMessagesAbandoned, this keeps messages eligible
-   * for processing so the next worker/generator can claim them.
-   *
-   * Only 'processing' rows are touched: status is reset to 'pending' and
-   * started_processing_at_epoch is cleared. created_at_epoch is intentionally
-   * preserved so observations get the original enqueue time, not the restart time.
-   * Stale-sweep protection comes from clearing started_processing_at_epoch (NULL
-   * is never < staleCutoff), so no timestamp refresh is needed.
-   * 'pending' rows are already in the correct state and are left untouched.
-   *
-   * No change to messages in 'processed' or 'failed' — those are terminal.
-   *
-   * @returns Number of 'processing' messages actually reset
+   * Clear all pending and processing messages for a session.
+   * Used by SqliteObservationQueueEngine and tests.
+   * @returns Number of messages deleted
    */
-  requeueInFlightForSession(sessionDbId: number): number {
-    const stmt = this.db.prepare(`
-      UPDATE pending_messages
-      SET status = 'pending', started_processing_at_epoch = NULL
-      WHERE session_db_id = ? AND status = 'processing'
-    `);
-    return stmt.run(sessionDbId).changes;
+  clearPendingForSession(sessionDbId: number): number {
+    return this.db.prepare(`
+      DELETE FROM pending_messages WHERE session_db_id = ? AND status IN ('pending', 'processing')
+    `).run(sessionDbId).changes;
   }
 
   /**
-   * Abort a specific message (delete from queue)
+   * Clear ALL pending and processing messages across all sessions.
+   * @returns Number of messages deleted
+   */
+  clearAll(): number {
+    return this.db.prepare(`
+      DELETE FROM pending_messages WHERE status IN ('pending', 'processing')
+    `).run().changes;
+  }
+
+  /**
+   * Delete a single message by id.
    */
   abortMessage(messageId: number): boolean {
-    const stmt = this.db.prepare('DELETE FROM pending_messages WHERE id = ?');
-    const result = stmt.run(messageId);
-    return result.changes > 0;
+    return this.db.prepare('DELETE FROM pending_messages WHERE id = ?').run(messageId).changes > 0;
   }
 
-  /**
-   * Retry all stuck messages at once
-   */
-  retryAllStuck(thresholdMs: number): number {
-    const cutoff = Date.now() - thresholdMs;
-    const stmt = this.db.prepare(`
-      UPDATE pending_messages
-      SET status = 'pending', started_processing_at_epoch = NULL
-      WHERE status = 'processing' AND started_processing_at_epoch < ?
-    `);
-    const result = stmt.run(cutoff);
-    return result.changes;
-  }
+  // ---------------------------------------------------------------------------
+  // Reset / Re-queue
+  // ---------------------------------------------------------------------------
 
   /**
-   * Get recently processed messages (for UI feedback)
-   * Shows messages completed in the last N minutes so users can see their stuck items were processed
-   */
-  getRecentlyProcessed(limit: number = 10, withinMinutes: number = 30): (PersistentPendingMessage & { project: string | null })[] {
-    const cutoff = Date.now() - (withinMinutes * 60 * 1000);
-    const stmt = this.db.prepare(`
-      SELECT pm.*, ss.project
-      FROM pending_messages pm
-      LEFT JOIN sdk_sessions ss ON pm.content_session_id = ss.content_session_id
-      WHERE pm.status = 'processed' AND pm.completed_at_epoch > ?
-      ORDER BY pm.completed_at_epoch DESC
-      LIMIT ?
-    `);
-    return stmt.all(cutoff, limit) as (PersistentPendingMessage & { project: string | null })[];
-  }
-
-  /**
-   * Mark message as failed (status: pending -> failed or back to pending for retry)
-   * If retry_count < maxRetries, moves back to 'pending' for retry
-   * Otherwise marks as 'failed' permanently
+   * Reset a processing message back to 'pending'.
+   * Upstream dropped retry tracking; a failure simply re-queues the message.
    */
   markFailed(messageId: number): void {
-    // Invariant: only act on rows currently 'processing'. If another caller
-    // already re-queued the row to 'pending' or marked it 'failed', this call
-    // is a no-op — prevents the race where worker A re-queues and worker B's
-    // fallback then flips the freshly-pending row to 'failed'. Atomic CAS on
-    // retry_count also avoids the original cap-bypass race.
-    const retryStmt = this.db.prepare(`
-      UPDATE pending_messages
-      SET status = 'pending', retry_count = retry_count + 1, started_processing_at_epoch = NULL
-      WHERE id = ? AND status = 'processing' AND retry_count < ?
-    `);
-    const result = retryStmt.run(messageId, this.maxRetries);
-
-    if (result.changes > 0) return;
-
-    // Row still 'processing' but hit retry cap → terminal fail. If the row has
-    // moved out of 'processing' (re-queued or already failed), this affects
-    // 0 rows and is a safe no-op. Uses failed_at_epoch to match the rest of
-    // the failure paths (markSessionMessagesFailed, stale-sweep).
-    const failStmt = this.db.prepare(`
-      UPDATE pending_messages
-      SET status = 'failed', failed_at_epoch = ?
-      WHERE id = ? AND status = 'processing'
-    `);
-    failStmt.run(Date.now(), messageId);
+    this.db.prepare(`
+      UPDATE pending_messages SET status = 'pending' WHERE id = ? AND status = 'processing'
+    `).run(messageId);
   }
 
   /**
-   * Reset stuck messages (processing -> pending if stuck longer than threshold)
-   * @param thresholdMs Messages processing longer than this are considered stuck (0 = reset all)
-   * @returns Number of messages reset
+   * Reset all processing messages for a session back to 'pending'.
+   * Used for graceful handoff to a new generator (preserves created_at_epoch).
+   * @returns Number of rows reset
    */
-  resetStuckMessages(thresholdMs: number): number {
-    const cutoff = thresholdMs === 0 ? Date.now() : Date.now() - thresholdMs;
-
-    const stmt = this.db.prepare(`
-      UPDATE pending_messages
-      SET status = 'pending', started_processing_at_epoch = NULL
-      WHERE status = 'processing' AND started_processing_at_epoch < ?
-    `);
-
-    const result = stmt.run(cutoff);
-    return result.changes;
+  resetProcessingToPending(sessionDbId: number): number {
+    return this.db.prepare(`
+      UPDATE pending_messages SET status = 'pending'
+      WHERE session_db_id = ? AND status = 'processing'
+    `).run(sessionDbId).changes;
   }
 
   /**
-   * Get count of pending messages for a session
+   * Alias for resetProcessingToPending — graceful handoff on generator completion.
+   * @returns Number of rows reset
+   */
+  requeueInFlightForSession(sessionDbId: number): number {
+    return this.resetProcessingToPending(sessionDbId);
+  }
+
+  /**
+   * Reset a specific message to 'pending'.
+   * Works for pending (re-queue) and processing (reset stuck).
+   */
+  retryMessage(messageId: number): boolean {
+    return this.db.prepare(`
+      UPDATE pending_messages SET status = 'pending'
+      WHERE id = ? AND status IN ('pending', 'processing')
+    `).run(messageId).changes > 0;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Stub methods — callers exist but started_processing_at_epoch is gone.
+  // These are intentional no-ops; the self-healing timer pattern is dropped.
+  // TODO: remove call sites once callers are updated.
+  // ---------------------------------------------------------------------------
+
+  /** @deprecated started_processing_at_epoch dropped; always returns 0. */
+  resetStaleProcessingMessages(_thresholdMs: number = 5 * 60 * 1000, _sessionDbId?: number): number {
+    return 0;
+  }
+
+  /** @deprecated started_processing_at_epoch dropped; always returns 0. */
+  resetStuckMessages(_thresholdMs: number): number {
+    return 0;
+  }
+
+  /** @deprecated started_processing_at_epoch dropped; always returns 0. */
+  getStuckCount(_thresholdMs: number): number {
+    return 0;
+  }
+
+  /** @deprecated started_processing_at_epoch dropped; always returns 0. */
+  retryAllStuck(_thresholdMs: number): number {
+    return 0;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Counts / Queries
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Count pending and processing messages for a session.
    */
   getPendingCount(sessionDbId: number): number {
-    const stmt = this.db.prepare(`
+    const result = this.db.prepare(`
       SELECT COUNT(*) as count FROM pending_messages
       WHERE session_db_id = ? AND status IN ('pending', 'processing')
-    `);
-    const result = stmt.get(sessionDbId) as { count: number };
+    `).get(sessionDbId) as { count: number };
     return result.count;
   }
 
   /**
-   * Peek at pending message types for a session (for tier routing).
-   * Returns list of { message_type, tool_name } without claiming.
+   * Count all pending and processing messages across all sessions.
    */
-  peekPendingTypes(sessionDbId: number): Array<{ message_type: string; tool_name: string | null }> {
-    const stmt = this.db.prepare(`
-      SELECT message_type, tool_name FROM pending_messages
-      WHERE session_db_id = ? AND status IN ('pending', 'processing')
-      ORDER BY id ASC
-    `);
-    return stmt.all(sessionDbId) as Array<{ message_type: string; tool_name: string | null }>;
+  getTotalQueueDepth(): number {
+    const result = this.db.prepare(`
+      SELECT COUNT(*) as count FROM pending_messages WHERE status IN ('pending', 'processing')
+    `).get() as { count: number };
+    return result.count;
   }
 
   /**
-   * Check if any session has pending work.
-   * Excludes 'processing' messages stuck for >5 minutes (resets them to 'pending' as a side effect).
+   * Check if any session has pending or processing work.
    */
   hasAnyPendingWork(): boolean {
-    // Reset stuck 'processing' messages older than 5 minutes before checking
-    const stuckCutoff = Date.now() - (5 * 60 * 1000);
-    const resetStmt = this.db.prepare(`
-      UPDATE pending_messages
-      SET status = 'pending', started_processing_at_epoch = NULL
-      WHERE status = 'processing' AND started_processing_at_epoch < ?
-    `);
-    const resetResult = resetStmt.run(stuckCutoff);
-    if (resetResult.changes > 0) {
-      logger.info('QUEUE', `STUCK_RESET | hasAnyPendingWork reset ${resetResult.changes} stuck processing message(s) older than 5 minutes`);
-    }
-
-    const stmt = this.db.prepare(`
-      SELECT COUNT(*) as count FROM pending_messages
-      WHERE status IN ('pending', 'processing')
-    `);
-    const result = stmt.get() as { count: number };
+    const result = this.db.prepare(`
+      SELECT COUNT(*) as count FROM pending_messages WHERE status IN ('pending', 'processing')
+    `).get() as { count: number };
     return result.count > 0;
   }
 
   /**
-   * Get all session IDs that have pending messages (for recovery on startup)
+   * Get all pending messages for a session (ordered by creation time).
+   */
+  getAllPending(sessionDbId: number): PersistentPendingMessage[] {
+    return this.db.prepare(`
+      SELECT * FROM pending_messages WHERE session_db_id = ? AND status = 'pending' ORDER BY id ASC
+    `).all(sessionDbId) as PersistentPendingMessage[];
+  }
+
+  /**
+   * Get all queue messages for UI display (pending + processing, with project name).
+   */
+  getQueueMessages(): (PersistentPendingMessage & { project: string | null })[] {
+    return this.db.prepare(`
+      SELECT pm.*, ss.project
+      FROM pending_messages pm
+      LEFT JOIN sdk_sessions ss ON pm.content_session_id = ss.content_session_id
+      WHERE pm.status IN ('pending', 'processing')
+      ORDER BY
+        CASE pm.status WHEN 'processing' THEN 0 WHEN 'pending' THEN 1 END,
+        pm.created_at_epoch ASC
+    `).all() as (PersistentPendingMessage & { project: string | null })[];
+  }
+
+  /**
+   * Peek at pending message types for a session (for tier routing), without claiming.
+   */
+  peekPendingTypes(sessionDbId: number): Array<{ message_type: string; tool_name: string | null }> {
+    return this.db.prepare(`
+      SELECT message_type, tool_name FROM pending_messages
+      WHERE session_db_id = ? AND status IN ('pending', 'processing')
+      ORDER BY id ASC
+    `).all(sessionDbId) as Array<{ message_type: string; tool_name: string | null }>;
+  }
+
+  /**
+   * Get all session db ids that have pending or processing messages (for startup recovery).
    */
   getSessionsWithPendingMessages(): number[] {
-    const stmt = this.db.prepare(`
+    const results = this.db.prepare(`
       SELECT DISTINCT session_db_id FROM pending_messages
       WHERE status IN ('pending', 'processing')
-    `);
-    const results = stmt.all() as { session_db_id: number }[];
+      ORDER BY session_db_id ASC
+    `).all() as { session_db_id: number }[];
     return results.map(r => r.session_db_id);
   }
 
   /**
-   * Get session info for a pending message (for recovery)
+   * Get session info for a pending message (for recovery).
    */
   getSessionInfoForMessage(messageId: number): { sessionDbId: number; contentSessionId: string } | null {
-    const stmt = this.db.prepare(`
+    const result = this.db.prepare(`
       SELECT session_db_id, content_session_id FROM pending_messages WHERE id = ?
-    `);
-    const result = stmt.get(messageId) as { session_db_id: number; content_session_id: string } | undefined;
+    `).get(messageId) as { session_db_id: number; content_session_id: string } | undefined;
     return result ? { sessionDbId: result.session_db_id, contentSessionId: result.content_session_id } : null;
   }
 
-  /**
-   * Clear all failed messages from the queue
-   * @returns Number of messages deleted
-   */
-  clearFailed(): number {
-    const stmt = this.db.prepare(`
-      DELETE FROM pending_messages
-      WHERE status = 'failed'
-    `);
-    const result = stmt.run();
-    return result.changes;
-  }
+  // ---------------------------------------------------------------------------
+  // Conversion
+  // ---------------------------------------------------------------------------
 
   /**
-   * Clear all pending, processing, and failed messages from the queue
-   * Keeps only processed messages (for history)
-   * @returns Number of messages deleted
-   */
-  clearAll(): number {
-    const stmt = this.db.prepare(`
-      DELETE FROM pending_messages
-      WHERE status IN ('pending', 'processing', 'failed')
-    `);
-    const result = stmt.run();
-    return result.changes;
-  }
-
-  /**
-   * Convert a PersistentPendingMessage back to PendingMessage format
+   * Convert a PersistentPendingMessage back to PendingMessage format.
    */
   toPendingMessage(persistent: PersistentPendingMessage): PendingMessage {
     return {
       type: persistent.message_type,
-      tool_name: persistent.tool_name || undefined,
+      tool_name: persistent.tool_name ?? undefined,
       tool_input: persistent.tool_input ? JSON.parse(persistent.tool_input) : undefined,
       tool_response: persistent.tool_response ? JSON.parse(persistent.tool_response) : undefined,
-      prompt_number: persistent.prompt_number || undefined,
-      cwd: persistent.cwd || undefined,
-      last_assistant_message: persistent.last_assistant_message || undefined,
+      prompt_number: persistent.prompt_number ?? undefined,
+      cwd: persistent.cwd ?? undefined,
+      last_assistant_message: persistent.last_assistant_message ?? undefined,
       agentId: persistent.agent_id ?? undefined,
-      agentType: persistent.agent_type ?? undefined
+      agentType: persistent.agent_type ?? undefined,
+      toolUseId: persistent.tool_use_id ?? undefined,
     };
   }
 }

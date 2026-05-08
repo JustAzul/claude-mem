@@ -69,10 +69,7 @@ export class SqliteObservationQueueEngine implements InspectableObservationQueue
   }
 
   async clearPendingForSession(sessionDbId: number): Promise<number> {
-    const result = this.db.prepare(
-      `DELETE FROM pending_messages WHERE session_db_id = ? AND status IN ('pending', 'processing')`
-    ).run(sessionDbId);
-    const rows = result.changes;
+    const rows = this.store.clearPendingForSession(sessionDbId);
     if (rows > 0) {
       this.emit(sessionDbId);
     }
@@ -92,10 +89,7 @@ export class SqliteObservationQueueEngine implements InspectableObservationQueue
   }
 
   async getTotalQueueDepth(): Promise<number> {
-    const result = this.db.prepare(
-      `SELECT COUNT(*) as count FROM pending_messages WHERE status IN ('pending', 'processing')`
-    ).get() as { count: number };
-    return result.count;
+    return this.store.getTotalQueueDepth();
   }
 
   async peekPendingTypes(sessionDbId: number): Promise<Array<{ message_type: string; tool_name: string | null }>> {
