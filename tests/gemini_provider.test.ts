@@ -112,7 +112,9 @@ describe('GeminiProvider', () => {
 
     mockSessionManager = {
       getMessageIterator: async function* () { yield* []; },
-      getPendingMessageStore: () => mockPendingMessageStore
+      getPendingMessageStore: () => mockPendingMessageStore,
+      confirmClaimedMessages: mock(() => Promise.resolve(0)),
+      resetProcessingToPending: mock(() => Promise.resolve(0)),
     } as unknown as SessionManager;
 
     agent = new GeminiProvider(mockDbManager, mockSessionManager);
@@ -139,6 +141,8 @@ describe('GeminiProvider', () => {
       cumulativeInputTokens: 0,
       cumulativeOutputTokens: 0,
       pendingMessages: [],
+      processingMessageIds: [],
+      consecutiveSummaryFailures: 0,
       abortController: new AbortController(),
       generatorPromise: null,
       currentProvider: null,
@@ -174,6 +178,8 @@ describe('GeminiProvider', () => {
       cumulativeInputTokens: 0,
       cumulativeOutputTokens: 0,
       pendingMessages: [],
+      processingMessageIds: [],
+      consecutiveSummaryFailures: 0,
       abortController: new AbortController(),
       generatorPromise: null,
       currentProvider: null,
@@ -205,6 +211,8 @@ describe('GeminiProvider', () => {
       cumulativeInputTokens: 0,
       cumulativeOutputTokens: 0,
       pendingMessages: [],
+      processingMessageIds: [],
+      consecutiveSummaryFailures: 0,
       abortController: new AbortController(),
       generatorPromise: null,
       currentProvider: null,
@@ -248,6 +256,8 @@ describe('GeminiProvider', () => {
       cumulativeInputTokens: 0,
       cumulativeOutputTokens: 0,
       pendingMessages: [],
+      processingMessageIds: [],
+      consecutiveSummaryFailures: 0,
       abortController: new AbortController(),
       generatorPromise: null,
       currentProvider: null,
@@ -271,6 +281,8 @@ describe('GeminiProvider', () => {
       cumulativeInputTokens: 0,
       cumulativeOutputTokens: 0,
       pendingMessages: [],
+      processingMessageIds: [],
+      consecutiveSummaryFailures: 0,
       abortController: new AbortController(),
       generatorPromise: null,
       currentProvider: null,

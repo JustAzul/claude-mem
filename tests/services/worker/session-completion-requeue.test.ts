@@ -1,16 +1,15 @@
 /**
  * Regression test for: routine worker restart silently drops in-flight messages.
  *
- * Empirical evidence (2026-04-18): ~44 pending_messages went status='failed'
- * (retry_count=0, started_processing_at_epoch=NULL) across a worker restart
- * because SessionCompletionHandler called markAllSessionMessagesAbandoned even
- * when the Claude Code parent session was still active.
+ * Post-merge (V40 schema): 'failed' status dropped, retry_count/started_processing_at_epoch
+ * removed. confirmProcessed() deletes rows; markAllSessionMessagesAbandoned() deletes rows.
+ * requeueInFlightForSession() resets processing → pending (UPDATE only).
  *
- * The preventive fix replaces that call with a new method,
+ * The preventive fix replaces the SessionCompletionHandler call with
  * requeueInFlightForSession, which resets in-flight rows back to 'pending' so
- * the next generator claims them. True-abandonment paths (no-fallback drain,
- * user cancel via wall-clock guard, idle/unrecoverable termination) still call
- * markAllSessionMessagesAbandoned.
+ * the next generator claims them. True-abandonment paths (user cancel via
+ * wall-clock guard, idle/unrecoverable termination) still call
+ * markAllSessionMessagesAbandoned which now DELETEs rows.
  *
  * This test locks the requeue contract at the PendingMessageStore layer and
  * proves (via a direct grep) that the SessionCompletionHandler wiring points
@@ -32,7 +31,7 @@ describe('session-completion requeue vs abandon', () => {
 
   beforeEach(() => {
     db = new ClaudeMemDatabase(':memory:').db;
-    pendingStore = new PendingMessageStore(db, 3);
+    pendingStore = new PendingMessageStore(db);
   });
 
   afterEach(() => {
@@ -61,6 +60,13 @@ describe('session-completion requeue vs abandon', () => {
     return rows.map((r) => r.status);
   }
 
+  function rowCount(sessionDbId: number): number {
+    const result = db
+      .prepare(`SELECT COUNT(*) as count FROM pending_messages WHERE session_db_id = ?`)
+      .get(sessionDbId) as { count: number };
+    return result.count;
+  }
+
   // -----------------------------------------------------------------
   // Graceful completion path — requeueInFlightForSession
   // -----------------------------------------------------------------
@@ -82,97 +88,83 @@ describe('session-completion requeue vs abandon', () => {
     expect(pendingStore.hasAnyPendingWork()).toBe(true);
   });
 
-  test('requeueInFlightForSession resets processing message back to pending and clears started_processing_at_epoch', () => {
+  test('requeueInFlightForSession resets processing message back to pending', () => {
     const sid = seedSession('content-graceful-processing');
     enqueueMessage(sid, 'content-graceful-processing');
     enqueueMessage(sid, 'content-graceful-processing');
 
-    // Claim one -> becomes 'processing' with started_processing_at_epoch set
+    // Claim one -> becomes 'processing'
     const claimed = pendingStore.claimNextMessage(sid);
     expect(claimed).not.toBeNull();
 
     const beforeRow = db
-      .prepare('SELECT status, started_processing_at_epoch FROM pending_messages WHERE id = ?')
-      .get(claimed!.id) as { status: string; started_processing_at_epoch: number | null };
+      .prepare('SELECT status FROM pending_messages WHERE id = ?')
+      .get(claimed!.id) as { status: string };
     expect(beforeRow.status).toBe('processing');
-    expect(beforeRow.started_processing_at_epoch).not.toBeNull();
 
     const changed = pendingStore.requeueInFlightForSession(sid);
     expect(changed).toBe(1); // only the 'processing' row is touched
 
     const afterRow = db
-      .prepare('SELECT status, started_processing_at_epoch FROM pending_messages WHERE id = ?')
-      .get(claimed!.id) as { status: string; started_processing_at_epoch: number | null };
+      .prepare('SELECT status FROM pending_messages WHERE id = ?')
+      .get(claimed!.id) as { status: string };
     expect(afterRow.status).toBe('pending');
-    expect(afterRow.started_processing_at_epoch).toBeNull();
     expect(pendingStore.hasAnyPendingWork()).toBe(true);
   });
 
-  test('requeueInFlightForSession does NOT touch processed or failed rows', () => {
+  test('requeueInFlightForSession does NOT touch confirmed-processed rows (deleted) or remaining pending rows', () => {
     const sid = seedSession('content-graceful-terminal');
     const msgA = enqueueMessage(sid, 'content-graceful-terminal', 'ToolA');
     const msgB = enqueueMessage(sid, 'content-graceful-terminal', 'ToolB');
-    const msgC = enqueueMessage(sid, 'content-graceful-terminal', 'ToolC');
 
-    // A claimed then marked processed (confirmProcessed deletes the row)
+    // A: claimed then confirmed processed — row is deleted
     pendingStore.claimNextMessage(sid);
     pendingStore.confirmProcessed(msgA);
     const aRow = db.prepare(`SELECT id FROM pending_messages WHERE id = ?`).get(msgA);
     expect(aRow).toBeNull();
 
-    // B claimed then failed terminally (simulate retry cap reached)
-    pendingStore.claimNextMessage(sid);
-    // Force to failed directly
-    db.prepare(
-      `UPDATE pending_messages SET status = 'failed', failed_at_epoch = ? WHERE id = ?`
-    ).run(Date.now(), msgB);
-
-    // C is left pending
+    // B is still pending (not claimed)
     expect(
-      (db.prepare(`SELECT status FROM pending_messages WHERE id = ?`).get(msgC) as { status: string }).status
+      (db.prepare(`SELECT status FROM pending_messages WHERE id = ?`).get(msgB) as { status: string }).status
     ).toBe('pending');
 
     const changed = pendingStore.requeueInFlightForSession(sid);
-    expect(changed).toBe(0); // C is 'pending', not 'processing' — not touched
+    expect(changed).toBe(0); // B is 'pending', not 'processing' — not touched
 
-    // A is gone (deleted on confirmProcessed), B stays failed, C stays pending
+    // A is gone, B stays pending
     const finalA = db.prepare(`SELECT status FROM pending_messages WHERE id = ?`).get(msgA);
     const finalB = db.prepare(`SELECT status FROM pending_messages WHERE id = ?`).get(msgB) as { status: string };
-    const finalC = db.prepare(`SELECT status FROM pending_messages WHERE id = ?`).get(msgC) as { status: string };
     expect(finalA).toBeNull();
-    expect(finalB.status).toBe('failed');
-    expect(finalC.status).toBe('pending');
+    expect(finalB.status).toBe('pending');
   });
 
   // -----------------------------------------------------------------
   // True-abandonment path — markAllSessionMessagesAbandoned
   // -----------------------------------------------------------------
 
-  test('user-cancel / wall-clock path (markAllSessionMessagesAbandoned) still marks pending as failed', () => {
+  test('user-cancel / wall-clock path (markAllSessionMessagesAbandoned) deletes pending and processing rows', () => {
     const sid = seedSession('content-abandon');
     enqueueMessage(sid, 'content-abandon');
     enqueueMessage(sid, 'content-abandon');
 
     const abandoned = pendingStore.markAllSessionMessagesAbandoned(sid);
     expect(abandoned).toBe(2);
-    expect(rowStatuses(sid)).toEqual(['failed', 'failed']);
+    expect(rowCount(sid)).toBe(0);
     expect(pendingStore.hasAnyPendingWork()).toBe(false);
   });
 
-  test('markAllSessionMessagesAbandoned and requeueInFlightForSession are mutually exclusive on terminal rows', () => {
+  test('markAllSessionMessagesAbandoned and requeueInFlightForSession are mutually exclusive: after abandon rows are deleted, requeue returns 0', () => {
     const sid = seedSession('content-exclusive');
     enqueueMessage(sid, 'content-exclusive');
 
-    // Abandon first
+    // Abandon first — row is deleted
     expect(pendingStore.markAllSessionMessagesAbandoned(sid)).toBe(1);
-    expect(rowStatuses(sid)).toEqual(['failed']);
+    expect(rowCount(sid)).toBe(0);
 
-    // A subsequent requeue must NOT resurrect a legitimately-failed message.
-    // (That's what the separate recovery script is for — and it gates on
-    // retry_count/started_processing_at_epoch.)
+    // A subsequent requeue must return 0 because no rows exist.
     const changed = pendingStore.requeueInFlightForSession(sid);
     expect(changed).toBe(0);
-    expect(rowStatuses(sid)).toEqual(['failed']);
+    expect(rowCount(sid)).toBe(0);
   });
 
   // -----------------------------------------------------------------
