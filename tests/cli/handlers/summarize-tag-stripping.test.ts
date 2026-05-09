@@ -2,6 +2,23 @@ import { describe, it, expect, beforeEach, afterEach, spyOn, mock } from 'bun:te
 import { homedir } from 'os';
 import { join } from 'path';
 
+// Defensive override: chroma-mcp-manager-ssl, timeline-formatting, and
+// claude-md-utils mock the logger with stubs missing `dataIn` (which
+// summarize.ts calls). Bun has no per-file mock-module restore, so this
+// top-level call wins for THIS file's import resolution.
+mock.module('../../../src/utils/logger.js', () => ({
+  logger: {
+    info: () => {},
+    debug: () => {},
+    warn: () => {},
+    error: () => {},
+    failure: () => {},
+    dataIn: () => {},
+    dataOut: () => {},
+    formatTool: (toolName: string, toolInput?: any) => toolInput ? `${toolName}(...)` : toolName,
+  },
+}));
+
 mock.module('../../../src/shared/SettingsDefaultsManager.js', () => ({
   SettingsDefaultsManager: {
     get: (key: string) => {
