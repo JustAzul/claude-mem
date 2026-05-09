@@ -1,7 +1,35 @@
 
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, mock } from 'bun:test';
 import express from 'express';
 import http from 'http';
+import cors from 'cors';
+
+// Defensive override: hook-execution-e2e and worker-api-endpoints integration
+// tests `mock.module` middleware.js with `createMiddleware: () => []`. Bun has
+// no per-file mock-module restore, so when the cors-restriction suite runs
+// after them, the empty middleware array means preflight responses lack all
+// CORS headers. Mirror the real `createCorsMiddleware` config inline (see
+// src/services/worker/http/middleware.ts:51) so the leak doesn't bleed in.
+mock.module('../../../src/services/worker/http/middleware.js', () => ({
+  createMiddleware: (_summarizer: unknown) => [
+    cors({
+      origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+        if (!origin
+          || origin.startsWith('http://localhost:')
+          || origin.startsWith('http://127.0.0.1:')) {
+          callback(null, true);
+        } else {
+          callback(new Error('CORS not allowed'));
+        }
+      },
+      methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+      credentials: false,
+    }),
+    express.json({ limit: '5mb' }),
+  ],
+}));
+
 import { createMiddleware } from '../../../src/services/worker/http/middleware.js';
 
 function isAllowedOrigin(origin: string | undefined): boolean {
