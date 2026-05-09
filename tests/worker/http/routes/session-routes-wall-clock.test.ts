@@ -83,7 +83,7 @@ describe('SessionRoutes wall-clock guard', () => {
     expect(startGeneratorWithProvider).not.toHaveBeenCalled();
   });
 
-  it('does not abort stale-origin sessions when there is a recent prompt', () => {
+  it('does not abort stale-origin sessions when there is a recent prompt', async () => {
     const session = createSession(73);
     const startGeneratorWithProvider = mock(() => {});
     const applyTierRouting = mock(() => {});
@@ -114,7 +114,7 @@ describe('SessionRoutes wall-clock guard', () => {
     (routes as any).applyTierRouting = applyTierRouting;
     (routes as any).getSelectedProvider = () => 'custom';
 
-    (routes as any).ensureGeneratorRunning(73, 'init');
+    await (routes as any).ensureGeneratorRunning(73, 'init');
 
     expect(session.abortController.signal.aborted).toBe(false);
     expect(startGeneratorWithProvider).toHaveBeenCalled();
