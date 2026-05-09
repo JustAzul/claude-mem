@@ -212,7 +212,8 @@ describe('SessionQueueProcessor', () => {
 
         const options: CreateIteratorOptions = {
           sessionDbId: 123,
-          signal: abortController.signal
+          signal: abortController.signal,
+          settlingWindowMs: 0,
         };
 
         const iterator = processor.createIterator(options);

@@ -185,10 +185,22 @@ export const fileContextHandler: EventHandler = {
       return { continue: true, suppressOutput: true };
     }
 
+    const additionalContext = timelines.join('\n\n---\n\n');
+    await reportMemoryAssist({
+      source: 'file_context',
+      status: 'injected',
+      reason: 'timeline_injected',
+      project,
+      contentSessionId: input.sessionId,
+      platformSource,
+      filePath,
+      estimatedInjectedTokens: estimateTokens(additionalContext),
+    });
+
     return {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
-        additionalContext: timelines.join('\n\n---\n\n'),
+        additionalContext,
         permissionDecision: 'allow',
       },
     };

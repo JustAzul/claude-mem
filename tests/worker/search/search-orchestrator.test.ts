@@ -150,16 +150,13 @@ describe('SearchOrchestrator', () => {
         expect(mockChromaSync.queryChroma).toHaveBeenCalled();
       });
 
-      it('should throw ChromaUnavailableError (HTTP 503) when Chroma fails', async () => {
+      it('should fall back to SQLite when Chroma fails', async () => {
         mockChromaSync.queryChroma = mock(() => Promise.reject(new Error('Chroma unavailable')));
 
-        await expect(
-          orchestrator.search({ query: 'test query' })
-        ).rejects.toMatchObject({
-          name: 'ChromaUnavailableError',
-          statusCode: 503,
-          code: 'CHROMA_UNAVAILABLE'
-        });
+        const result = await orchestrator.search({ query: 'test query' });
+
+        expect(result.fellBack).toBe(true);
+        expect(result.usedChroma).toBe(false);
       });
 
       it('should normalize comma-separated concepts', async () => {

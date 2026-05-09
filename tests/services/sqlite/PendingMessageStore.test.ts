@@ -218,7 +218,9 @@ describe('PendingMessageStore current schema guardrails', () => {
     const db = initialStore.db;
     const sessionDbId = initialStore.createSDKSession('content-drop-failure', 'test-project', 'initial prompt');
     rebuildLegacyPendingMessagesWithDeadColumns(db);
-    db.prepare('DELETE FROM schema_versions WHERE version IN (31, 32)').run();
+    // Renumbered upstream V31 → V38 to avoid collision with our V31 (context-origin).
+    // See src/services/sqlite/migrations/runner.ts:1419.
+    db.prepare('DELETE FROM schema_versions WHERE version IN (38)').run();
     db.prepare(`
       INSERT INTO pending_messages (
         id, session_db_id, content_session_id, message_type, status,
@@ -237,11 +239,11 @@ describe('PendingMessageStore current schema guardrails', () => {
 
     const repairedStore = new SessionStore(db);
     try {
-      const version31 = db
+      const version38 = db
         .prepare('SELECT version FROM schema_versions WHERE version = ?')
-        .get(31);
+        .get(38);
 
-      expect(version31).toBeNull();
+      expect(version38).toBeNull();
       expect(getColumnNames(db, 'pending_messages')).toContain('completed_at_epoch');
       const rowCount = db.prepare(`
         SELECT COUNT(*) AS count

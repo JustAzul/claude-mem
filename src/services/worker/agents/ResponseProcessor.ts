@@ -220,6 +220,7 @@ export async function processAgentResponse(
 
   await sessionManager.confirmClaimedMessages(session.sessionDbId);
   session.earliestPendingTimestamp = null;
+  session.processingMessageIds = [];
   session.restartGuard?.recordSuccess();
   worker?.broadcastProcessingStatus?.();
 
