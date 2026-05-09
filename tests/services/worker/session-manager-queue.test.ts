@@ -1,5 +1,49 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import type { Database } from 'bun:sqlite';
+import {
+  existsSync as _existsSyncForMock,
+  readFileSync as _readFileSyncForMock,
+} from 'fs';
+
+// Defensive override: tests/cli/handlers/summarize-tag-stripping.test.ts
+// `mock.module` SettingsDefaultsManager with `loadFromFile` returning only
+// `{ CLAUDE_MEM_EXCLUDED_PROJECTS: '' }`. Bun has no per-file mock-module restore,
+// so when this suite runs after it, redis-config.ts's `getQueueSetting('CLAUDE_MEM_QUEUE_ENGINE')`
+// gets undefined → `.trim()` throws TypeError on the first queueObservation call.
+// Mirror the real semantics (see src/shared/SettingsDefaultsManager.ts): defaults
+// applied, file read when present, env vars take precedence via callers (we don't
+// touch env here). Reading the file rather than ignoring its arg keeps redis-config.test.ts
+// green when its file-based fixture is loaded later.
+mock.module('../../../src/shared/SettingsDefaultsManager.js', () => {
+  const DEFAULTS: Record<string, string> = {
+    CLAUDE_MEM_QUEUE_ENGINE: 'sqlite',
+    CLAUDE_MEM_REDIS_URL: '',
+    CLAUDE_MEM_REDIS_HOST: '127.0.0.1',
+    CLAUDE_MEM_REDIS_PORT: '6379',
+    CLAUDE_MEM_REDIS_MODE: 'external',
+    CLAUDE_MEM_QUEUE_REDIS_PREFIX: 'claude_mem_test',
+    CLAUDE_MEM_EXCLUDED_PROJECTS: '',
+  };
+  return {
+    SettingsDefaultsManager: {
+      get: (key: string) => process.env[key] ?? DEFAULTS[key] ?? '',
+      getInt: (key: string) => Number(process.env[key] ?? DEFAULTS[key] ?? 0),
+      getAllDefaults: () => ({ ...DEFAULTS }),
+      loadFromFile: (settingsPath: string) => {
+        if (!settingsPath || !_existsSyncForMock(settingsPath)) {
+          return { ...DEFAULTS };
+        }
+        try {
+          const parsed = JSON.parse(_readFileSyncForMock(settingsPath, 'utf-8'));
+          return { ...DEFAULTS, ...parsed };
+        } catch {
+          return { ...DEFAULTS };
+        }
+      },
+    },
+  };
+});
+
 import { ClaudeMemDatabase } from '../../../src/services/sqlite/Database.js';
 import { SessionStore } from '../../../src/services/sqlite/SessionStore.js';
 import type { DatabaseManager } from '../../../src/services/worker/DatabaseManager.js';

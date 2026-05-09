@@ -1,5 +1,57 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { Database } from 'bun:sqlite';
+import express from 'express';
+import cors from 'cors';
+
+// Defensive override: tests/integration/{worker-api-endpoints,hook-execution-e2e}
+// `mock.module` `worker/http/middleware.js` with `createMiddleware: () => []`. Bun has
+// no per-file mock-module restore, so when this suite runs after them, Server.ts
+// (which imports via server/Middleware.ts → re-exports worker/http/middleware.js)
+// gets an empty middleware array → no body parser → POST /v1/projects body is undef
+// → 400 ValidationError. Mirror the real createMiddleware/createCorsMiddleware here.
+mock.module('../../src/services/worker/http/middleware.js', () => ({
+  createMiddleware: (
+    _summarizer: (method: string, path: string, body: unknown) => string,
+    options: { includeCors?: boolean } = {},
+  ) => {
+    const mws: any[] = [];
+    if (options.includeCors !== false) {
+      mws.push(cors({
+        origin: (origin: string | undefined, cb: (err: Error | null, ok?: boolean) => void) => {
+          if (!origin
+            || origin.startsWith('http://localhost:')
+            || origin.startsWith('http://127.0.0.1:')) {
+            cb(null, true);
+          } else {
+            cb(new Error('CORS not allowed'));
+          }
+        },
+        methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+        credentials: false,
+      }));
+    }
+    mws.push(express.json({ limit: '5mb' }));
+    return mws;
+  },
+  createCorsMiddleware: () => cors({
+    origin: (origin: string | undefined, cb: (err: Error | null, ok?: boolean) => void) => {
+      if (!origin
+        || origin.startsWith('http://localhost:')
+        || origin.startsWith('http://127.0.0.1:')) {
+        cb(null, true);
+      } else {
+        cb(new Error('CORS not allowed'));
+      }
+    },
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    credentials: false,
+  }),
+  requireLocalhost: (_req: unknown, _res: unknown, next: () => void) => next(),
+  summarizeRequestBody: (_method: string, _path: string, _body: unknown) => '',
+}));
+
 import { Server, type ServerOptions } from '../../src/services/server/Server.js';
 import { ServerV1Routes } from '../../src/server/routes/v1/ServerV1Routes.js';
 import { createServerApiKey } from '../../src/server/auth/api-key-service.js';
