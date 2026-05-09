@@ -2,6 +2,41 @@
 import { describe, it, expect, mock, beforeEach, afterEach, spyOn } from 'bun:test';
 import type { Request, Response } from 'express';
 import { logger } from '../../../../src/utils/logger.js';
+import {
+  existsSync as _existsSyncForMock,
+  mkdirSync as _mkdirSyncForMock,
+  readFileSync as _readFileSyncForMock,
+  writeFileSync as _writeFileSyncForMock,
+} from 'fs';
+import { dirname as _dirnameForMock } from 'path';
+
+// Defensive override: leakers (chroma-mcp-manager-ssl, file-context, summarize-*)
+// `mock.module` SettingsDefaultsManager with stubs missing real `loadFromFile`,
+// which makes `getCachedSettings()` return shapes without
+// `CLAUDE_MEM_WELCOME_HINT_ENABLED` or `CLAUDE_MEM_WORKER_PORT` and breaks the
+// hint path in this suite. Bun has no per-file mock-module restore, so this
+// top-level call wins for THIS file's import resolution.
+mock.module('../../../../src/shared/SettingsDefaultsManager.js', () => {
+  const DEFAULTS = {
+    CLAUDE_MEM_WELCOME_HINT_ENABLED: 'true',
+    CLAUDE_MEM_WORKER_PORT: '37700',
+  } as Record<string, string>;
+  return {
+    SettingsDefaultsManager: {
+      getAllDefaults: () => ({ ...DEFAULTS }),
+      loadFromFile: (settingsPath: string) => {
+        if (!_existsSyncForMock(settingsPath)) {
+          const dir = _dirnameForMock(settingsPath);
+          if (!_existsSyncForMock(dir)) _mkdirSyncForMock(dir, { recursive: true });
+          _writeFileSyncForMock(settingsPath, JSON.stringify(DEFAULTS, null, 2), 'utf-8');
+          return { ...DEFAULTS };
+        }
+        const parsed = JSON.parse(_readFileSyncForMock(settingsPath, 'utf-8'));
+        return { ...DEFAULTS, ...parsed };
+      },
+    },
+  };
+});
 
 const generateContextStub = mock(async () => 'CONTEXT_FROM_GENERATOR');
 mock.module('../../../../src/services/context-generator.js', () => ({
