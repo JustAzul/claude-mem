@@ -71,17 +71,19 @@ describe('parseAgentXml — summaries', () => {
     const result = parseAgentXml('<observation><title>foo</title></observation>');
     expect(result.valid).toBe(true);
     if (result.valid) {
-      expect(result.kind).toBe('observation');
+      expect(result.observations.length).toBeGreaterThan(0);
+      expect(result.summary).toBeNull();
     }
   });
 
-  it('prefers <summary> over <observation> when both present', () => {
+  it('returns observations when <observation> appears before <summary>', () => {
     const text = `<observation><title>obs title</title></observation>
     <summary><request>summary request</request></summary>`;
     const result = parseAgentXml(text);
     expect(result.valid).toBe(true);
     if (result.valid) {
-      expect(result.kind).toBe('observation');
+      expect(result.observations.length).toBeGreaterThan(0);
+      expect(result.summary).toBeNull();
     }
   });
 
