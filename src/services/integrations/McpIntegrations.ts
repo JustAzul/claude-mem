@@ -61,7 +61,7 @@ function installMcpIntegration(config: McpInstallerConfig): () => Promise<number
         ideLabel: config.ideLabel,
       });
       process.stderr.write('Could not find MCP server script\n');
-      process.stderr.write('   Expected at: ~/.claude/plugins/marketplaces/thedotmack/plugin/scripts/mcp-server.cjs\n');
+      process.stderr.write('   Expected at: ~/.claude/plugins/marketplaces/JustAzul/plugin/scripts/mcp-server.cjs\n');
       return 1;
     }
 
@@ -206,7 +206,7 @@ export async function installGooseMcpIntegration(): Promise<number> {
   if (!mcpServerPath) {
     logger.error('SYSTEM', 'Goose MCP integration install failed because the MCP server script was not found');
     process.stderr.write('Could not find MCP server script\n');
-    process.stderr.write('   Expected at: ~/.claude/plugins/marketplaces/thedotmack/plugin/scripts/mcp-server.cjs\n');
+    process.stderr.write('   Expected at: ~/.claude/plugins/marketplaces/JustAzul/plugin/scripts/mcp-server.cjs\n');
     return 1;
   }
 

@@ -5,8 +5,8 @@ const { existsSync, readFileSync, readdirSync, statSync } = require('fs');
 const path = require('path');
 const os = require('os');
 
-const INSTALLED_PATH = path.join(os.homedir(), '.claude', 'plugins', 'marketplaces', 'thedotmack');
-const CACHE_BASE_PATH = path.join(os.homedir(), '.claude', 'plugins', 'cache', 'thedotmack', 'claude-mem');
+const INSTALLED_PATH = path.join(os.homedir(), '.claude', 'plugins', 'marketplaces', 'JustAzul');
+const CACHE_BASE_PATH = path.join(os.homedir(), '.claude', 'plugins', 'cache', 'JustAzul', 'claude-mem');
 
 // Reject obviously invalid ports before they reach http.request, which would
 // throw with a confusing error like "RangeError: Port should be > 0 and < 65536".
