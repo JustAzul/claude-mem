@@ -73,11 +73,24 @@ export function replaceTaggedContent(existingContent: string, newContent: string
 }
 
 export function writeClaudeMdToFolder(folderPath: string, newContent: string, targetFilename?: string): void {
+  // Defensive: bundle observed ERR_INVALID_ARG_VALUE in path.join when folderPath
+  // arrived undefined/empty/with-null-byte from tool-input upstream. Skip silently;
+  // the hook fires per tool call and we don't want spam on every PostToolUse.
+  if (!folderPath || typeof folderPath !== 'string' || folderPath.length === 0 || folderPath.includes('\0')) {
+    logger.debug('FOLDER_INDEX', 'Skipping invalid folderPath', { folderPath: typeof folderPath });
+    return;
+  }
+
   const resolvedPath = path.resolve(folderPath);
 
   if (resolvedPath.includes('/.git/') || resolvedPath.includes('\\.git\\') || resolvedPath.endsWith('/.git') || resolvedPath.endsWith('\\.git')) return;
 
   const filename = targetFilename ?? getTargetFilename();
+  if (!filename || typeof filename !== 'string') {
+    logger.debug('FOLDER_INDEX', 'Skipping invalid filename', { filename: typeof filename });
+    return;
+  }
+
   const claudeMdPath = path.join(folderPath, filename);
   const tempFile = `${claudeMdPath}.tmp`;
 
