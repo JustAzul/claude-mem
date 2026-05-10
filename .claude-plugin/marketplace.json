@@ -1,11 +1,11 @@
 {
-  "name": "thedotmack",
+  "name": "JustAzul",
   "owner": {
-    "name": "Alex Newman"
+    "name": "JustAzul"
   },
   "metadata": {
-    "description": "Plugins by Alex Newman (thedotmack)",
-    "homepage": "https://github.com/thedotmack/claude-mem"
+    "description": "Plugins forked + maintained by JustAzul",
+    "homepage": "https://github.com/JustAzul/claude-mem"
   },
   "plugins": [
     {
