@@ -49,6 +49,21 @@ function stripHardcodedDirname(filePath) {
   }
 }
 
+// esbuild emits `(0,X.createRequire)(Y.url)` from `createRequire(import.meta.url)` even
+// when target=cjs, where Y is a fake import.meta object whose `url` is undefined at
+// runtime → ERR_INVALID_ARG_VALUE crashes the daemon at startup. The banner above
+// already provides a real __filename via process.argv[1], so swap the call to use it.
+function patchCreateRequireImportMeta(filePath) {
+  let content = fs.readFileSync(filePath, 'utf-8');
+  const re = /(\(\s*0\s*,\s*[A-Za-z_$][\w$]*\.createRequire\s*\))\s*\(\s*[A-Za-z_$][\w$]*\.url\s*\)/g;
+  let count = 0;
+  content = content.replace(re, (_m, prefix) => { count++; return `${prefix}(__filename)`; });
+  if (count > 0) {
+    fs.writeFileSync(filePath, content);
+    console.log(`  ✓ Patched ${count} createRequire(import.meta.url) → createRequire(__filename)`);
+  }
+}
+
 async function buildHooks() {
   console.log('🔨 Building claude-mem hooks and worker service...\n');
 
@@ -169,6 +184,7 @@ async function buildHooks() {
     });
 
     stripHardcodedDirname(`${hooksDir}/${WORKER_SERVICE.name}.cjs`);
+    patchCreateRequireImportMeta(`${hooksDir}/${WORKER_SERVICE.name}.cjs`);
 
     fs.chmodSync(`${hooksDir}/${WORKER_SERVICE.name}.cjs`, 0o755);
     const workerStats = fs.statSync(`${hooksDir}/${WORKER_SERVICE.name}.cjs`);
@@ -201,6 +217,7 @@ async function buildHooks() {
     });
 
     stripHardcodedDirname(`${hooksDir}/${SERVER_BETA_SERVICE.name}.cjs`);
+    patchCreateRequireImportMeta(`${hooksDir}/${SERVER_BETA_SERVICE.name}.cjs`);
 
     fs.chmodSync(`${hooksDir}/${SERVER_BETA_SERVICE.name}.cjs`, 0o755);
     const serverBetaStats = fs.statSync(`${hooksDir}/${SERVER_BETA_SERVICE.name}.cjs`);
@@ -253,6 +270,7 @@ async function buildHooks() {
     });
 
     stripHardcodedDirname(`${hooksDir}/${MCP_SERVER.name}.cjs`);
+    patchCreateRequireImportMeta(`${hooksDir}/${MCP_SERVER.name}.cjs`);
 
     fs.chmodSync(`${hooksDir}/${MCP_SERVER.name}.cjs`, 0o755);
     const mcpServerStats = fs.statSync(`${hooksDir}/${MCP_SERVER.name}.cjs`);
@@ -299,6 +317,7 @@ async function buildHooks() {
     });
 
     stripHardcodedDirname(`${hooksDir}/${CONTEXT_GENERATOR.name}.cjs`);
+    patchCreateRequireImportMeta(`${hooksDir}/${CONTEXT_GENERATOR.name}.cjs`);
 
     const contextGenStats = fs.statSync(`${hooksDir}/${CONTEXT_GENERATOR.name}.cjs`);
     console.log(`✓ context-generator built (${(contextGenStats.size / 1024).toFixed(2)} KB)`);
