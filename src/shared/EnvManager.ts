@@ -108,6 +108,9 @@ export function loadClaudeMemEnv(): ClaudeMemEnv {
     if (parsed.ANTHROPIC_AUTH_TOKEN) result.ANTHROPIC_AUTH_TOKEN = parsed.ANTHROPIC_AUTH_TOKEN;
     if (parsed.GEMINI_API_KEY) result.GEMINI_API_KEY = parsed.GEMINI_API_KEY;
     if (parsed.OPENROUTER_API_KEY) result.OPENROUTER_API_KEY = parsed.OPENROUTER_API_KEY;
+    if (parsed.CUSTOM_OPENAI_API_KEY) result.CUSTOM_OPENAI_API_KEY = parsed.CUSTOM_OPENAI_API_KEY;
+    if (parsed.CUSTOM_OPENAI_BASE_URL) result.CUSTOM_OPENAI_BASE_URL = parsed.CUSTOM_OPENAI_BASE_URL;
+    if (parsed.CUSTOM_OPENAI_MODEL) result.CUSTOM_OPENAI_MODEL = parsed.CUSTOM_OPENAI_MODEL;
 
     return result;
   } catch (error: unknown) {
@@ -171,6 +174,27 @@ export function saveClaudeMemEnv(env: ClaudeMemEnv): void {
       delete updated.OPENROUTER_API_KEY;
     }
   }
+  if (env.CUSTOM_OPENAI_API_KEY !== undefined) {
+    if (env.CUSTOM_OPENAI_API_KEY) {
+      updated.CUSTOM_OPENAI_API_KEY = env.CUSTOM_OPENAI_API_KEY;
+    } else {
+      delete updated.CUSTOM_OPENAI_API_KEY;
+    }
+  }
+  if (env.CUSTOM_OPENAI_BASE_URL !== undefined) {
+    if (env.CUSTOM_OPENAI_BASE_URL) {
+      updated.CUSTOM_OPENAI_BASE_URL = env.CUSTOM_OPENAI_BASE_URL;
+    } else {
+      delete updated.CUSTOM_OPENAI_BASE_URL;
+    }
+  }
+  if (env.CUSTOM_OPENAI_MODEL !== undefined) {
+    if (env.CUSTOM_OPENAI_MODEL) {
+      updated.CUSTOM_OPENAI_MODEL = env.CUSTOM_OPENAI_MODEL;
+    } else {
+      delete updated.CUSTOM_OPENAI_MODEL;
+    }
+  }
 
   try {
     writeFileSync(envFile, serializeEnvFile(updated), { encoding: 'utf-8', mode: 0o600 });
@@ -210,6 +234,15 @@ export function buildIsolatedEnv(includeCredentials: boolean = true): Record<str
     }
     if (credentials.OPENROUTER_API_KEY) {
       isolatedEnv.OPENROUTER_API_KEY = credentials.OPENROUTER_API_KEY;
+    }
+    if (credentials.CUSTOM_OPENAI_API_KEY) {
+      isolatedEnv.CUSTOM_OPENAI_API_KEY = credentials.CUSTOM_OPENAI_API_KEY;
+    }
+    if (credentials.CUSTOM_OPENAI_BASE_URL) {
+      isolatedEnv.CUSTOM_OPENAI_BASE_URL = credentials.CUSTOM_OPENAI_BASE_URL;
+    }
+    if (credentials.CUSTOM_OPENAI_MODEL) {
+      isolatedEnv.CUSTOM_OPENAI_MODEL = credentials.CUSTOM_OPENAI_MODEL;
     }
 
     // Note: CLAUDE_CODE_OAUTH_TOKEN is intentionally NOT copied from
