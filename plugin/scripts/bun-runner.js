@@ -66,7 +66,8 @@ function isPluginDisabledInClaudeSettings() {
     const settingsPath = join(configDir, 'settings.json');
     if (!existsSync(settingsPath)) return false;
     const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
-    return settings?.enabledPlugins?.['claude-mem@thedotmack'] === false;
+    return settings?.enabledPlugins?.['claude-mem@JustAzul'] === false
+      || settings?.enabledPlugins?.['claude-mem@thedotmack'] === false;
   } catch {
     return false;
   }
