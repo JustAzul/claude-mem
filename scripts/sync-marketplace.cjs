@@ -127,7 +127,7 @@ if (installedMismatch) {
   console.log(`its cache dir. Mirroring this build into the installed-version cache so the`);
   console.log('worker restart picks up new code without a Claude Code session restart.');
   console.log('');
-  console.log('\x1b[36m%s\x1b[0m', `For a formal version bump, run \`claude plugin update thedotmack/claude-mem\``);
+  console.log('\x1b[36m%s\x1b[0m', `For a formal version bump, run \`claude plugin update JustAzul/claude-mem\``);
   console.log('\x1b[36m%s\x1b[0m', `and restart Claude Code so it loads the ${getPluginVersion()} cache dir.`);
   console.log('');
 }
@@ -138,13 +138,13 @@ try {
   const gitignoreExcludes = getGitignoreExcludes(rootDir);
 
   execSync(
-    `rsync -av --delete --exclude=.git --exclude=bun.lock --exclude=package-lock.json --exclude=scripts/package.json --exclude=scripts/node_modules ${gitignoreExcludes} ./ ~/.claude/plugins/marketplaces/thedotmack/`,
+    `rsync -av --delete --exclude=.git --exclude=bun.lock --exclude=package-lock.json --exclude=scripts/package.json --exclude=scripts/node_modules ${gitignoreExcludes} ./ ~/.claude/plugins/marketplaces/JustAzul/`,
     { stdio: 'inherit' }
   );
 
   console.log('Running bun install in marketplace...');
   execSync(
-    'cd ~/.claude/plugins/marketplaces/thedotmack/ && bun install',
+    'cd ~/.claude/plugins/marketplaces/JustAzul/ && bun install',
     { stdio: 'inherit' }
   );
 
