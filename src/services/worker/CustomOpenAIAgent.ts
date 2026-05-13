@@ -293,43 +293,53 @@ export class CustomOpenAIAgent {
       estimatedTokens: this.estimateTokens(truncated.map(m => m.content).join(''))
     });
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Custom provider API error: ${response.status} - ${errorText}`);
-    }
-
-    const data = await response.json() as OpenAIChatResponse;
-    if (data.error) {
-      throw new Error(`Custom provider API error: ${data.error.code} - ${data.error.message}`);
-    }
-
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) {
-      logger.error('SDK', 'Empty response from custom provider', { url, model });
-      return { content: '' };
-    }
-
-    const tokensUsed = data.usage?.total_tokens;
-    if (tokensUsed) {
-      logger.info('SDK', 'Custom provider usage', {
-        model,
-        inputTokens: data.usage?.prompt_tokens || 0,
-        outputTokens: data.usage?.completion_tokens || 0,
-        totalTokens: tokensUsed,
-        messagesInContext: truncated.length
+    const attempt = async (): Promise<{ content: string; tokensUsed?: number }> => {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
       });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Custom provider API error: ${response.status} - ${errorText}`);
+      }
+
+      const data = await response.json() as OpenAIChatResponse;
+      if (data.error) {
+        throw new Error(`Custom provider API error: ${data.error.code} - ${data.error.message}`);
+      }
+
+      const content = data.choices?.[0]?.message?.content ?? '';
+      const tokensUsed = data.usage?.total_tokens;
+      if (content && tokensUsed) {
+        logger.info('SDK', 'Custom provider usage', {
+          model,
+          inputTokens: data.usage?.prompt_tokens || 0,
+          outputTokens: data.usage?.completion_tokens || 0,
+          totalTokens: tokensUsed,
+          messagesInContext: truncated.length
+        });
+      }
+      return { content, tokensUsed };
+    };
+
+    const first = await attempt();
+    if (first.content) return first;
+
+    logger.warn('SDK', 'Custom provider returned empty content; retrying once', { url, model });
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const retry = await attempt();
+    if (retry.content) {
+      logger.info('SDK', 'Custom provider retry succeeded after empty response', { url, model });
+      return retry;
     }
 
-    return { content, tokensUsed };
+    logger.error('SDK', 'Empty response from custom provider after retry', { url, model });
+    return { content: '' };
   }
 
   private getConfig(): { apiKey: string; baseUrl: string; model: string } {
