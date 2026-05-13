@@ -24,8 +24,6 @@ import { SessionManager } from './SessionManager.js';
 import {
   isAbortError,
   processAgentResponse,
-  shouldFallbackToClaude,
-  type FallbackAgent,
   type WorkerRef
 } from './agents/index.js';
 
@@ -54,15 +52,10 @@ interface OpenAIChatResponse {
 export class CustomOpenAIAgent {
   private dbManager: DatabaseManager;
   private sessionManager: SessionManager;
-  private fallbackAgent: FallbackAgent | null = null;
 
   constructor(dbManager: DatabaseManager, sessionManager: SessionManager) {
     this.dbManager = dbManager;
     this.sessionManager = sessionManager;
-  }
-
-  setFallbackAgent(agent: FallbackAgent): void {
-    this.fallbackAgent = agent;
   }
 
   async startSession(session: ActiveSession, worker?: WorkerRef): Promise<void> {
@@ -122,7 +115,7 @@ export class CustomOpenAIAgent {
       let lastCwd: string | undefined;
 
       for await (const message of this.sessionManager.getMessageIterator(session.sessionDbId)) {
-        session.processingMessageIds.push(message._persistentId);
+        session.claimedMessageIds.push(message._persistentId);
 
         if (message.cwd) lastCwd = message.cwd;
         const originalTimestamp = session.earliestPendingTimestamp;
@@ -218,14 +211,6 @@ export class CustomOpenAIAgent {
       if (isAbortError(error)) {
         logger.warn('SDK', 'Custom OpenAI agent aborted', { sessionId: session.sessionDbId });
         throw error;
-      }
-
-      if (shouldFallbackToClaude(error) && this.fallbackAgent) {
-        logger.warn('SDK', 'Custom provider failed, falling back to Claude SDK', {
-          sessionDbId: session.sessionDbId,
-          error: error instanceof Error ? error.message : String(error)
-        });
-        return this.fallbackAgent.startSession(session, worker);
       }
 
       logger.failure('SDK', 'Custom OpenAI agent error', { sessionDbId: session.sessionDbId }, error as Error);

@@ -526,7 +526,7 @@ export class WorkerService implements WorkerRef {
    */
   private reclassifyAtDispatch(
     error: unknown,
-    agent: ClaudeProvider | GeminiProvider | OpenRouterProvider
+    agent: ClaudeProvider | GeminiProvider | OpenRouterProvider | CustomOpenAIAgent
   ): ClassifiedProviderError | null {
     try {
       if (agent instanceof ClaudeProvider) {
